@@ -3,12 +3,15 @@
 
 # Production
 /build
+/docs/generated
+/sidebars.generated.ts
 
 # Generated files
 .docusaurus
 .cache-loader
 /.tmp
 /static/search-records.json
+/static/search-suggestions.json
 /static/raw-docs
 /static/llms.txt
 /static/llms-full.txt
@@ -16,6 +19,7 @@
 # Misc
 .DS_Store
 .env.local
+.env
 .env.development.local
 .env.test.local
 .env.production.local

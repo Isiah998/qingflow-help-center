@@ -1,12 +1,12 @@
-import type {FormEvent, ReactNode} from 'react';
+import type {ReactNode} from 'react';
 import {useEffect, useRef, useState} from 'react';
 import Link from '@docusaurus/Link';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Layout from '@theme/Layout';
 import Heading from '@theme/Heading';
+import SearchCombobox from '@site/src/components/SearchCombobox';
 import {
-  ArrowRight,
   ChevronLeft,
   ChevronRight,
   FileSearch,
@@ -16,11 +16,32 @@ import {
 } from 'lucide-react';
 
 import styles from './search.module.css';
+import {
+  addSearchHighlightToUrl,
+  buildSearchQuery,
+  createMultiSearchSnippet,
+  findSearchMatches,
+  getSearchHighlightTerms,
+  getSearchBusinessPriority,
+  hasMatchingSection,
+  mergeSearchDocuments,
+  normalizeSearchText,
+  rankSearchResults,
+  scoreSearchDocument,
+  selectGroupedSearchResult,
+} from '../utils/search-results.mjs';
+import {
+  createTypesenseSearch,
+  expandSearchQuery,
+  getGroupedSearchHits,
+} from '../utils/search-client.mjs';
 
 type SearchDocument = {
+  id?: string;
   doc_id?: string;
   record_type?: 'document' | 'section';
   title?: string;
+  document_title?: string;
   section?: string;
   breadcrumb?: string;
   keywords?: string[];
@@ -31,6 +52,7 @@ type SearchDocument = {
   product?: string;
   business_priority?: number;
   tags?: string[];
+  search_tokens?: string[];
 };
 
 type SearchMatch = {start: number; end: number};
@@ -39,6 +61,7 @@ type ResultSnippet = SearchSnippet & {source: 'local' | 'typesense'};
 
 type SearchHit = {
   document?: SearchDocument;
+  matchingDocuments?: SearchDocument[];
   snippet?: string;
   snippetMatches?: SearchMatch[];
   highlights?: Array<{
@@ -53,6 +76,10 @@ type LocalSearchData = {documents: SearchDocument[]; synonymGroups: SynonymGroup
 type SearchPageResult = {hits: SearchHit[]; found: number; page: number; perPage: number};
 
 const PAGE_SIZE = 8;
+const GROUP_HIT_LIMIT = 5;
+const RELAXED_CANDIDATE_LIMIT = 40;
+const RELAXED_RESULT_LIMIT = 2;
+const SEARCH_LOADING_DELAY_MS = 200;
 
 const localDocuments: SearchDocument[] = [
   {
@@ -113,192 +140,15 @@ const localDocuments: SearchDocument[] = [
   },
 ];
 
-function normalizeSearchText(value: string): string {
-  return value.toLowerCase().replace(/[\s\u3000]+/g, '').trim();
-}
-
-function normalizeSearchTextWithMap(value: string): {
-  text: string;
-  offsets: number[];
-  endOffsets: number[];
-} {
-  let text = '';
-  const offsets: number[] = [];
-  const endOffsets: number[] = [];
-  let offset = 0;
-
-  for (const character of value.toLowerCase()) {
-    const startOffset = offset;
-    offset += character.length;
-    if (/^[\s\u3000]$/u.test(character)) continue;
-
-    for (const normalizedCharacter of Array.from(character)) {
-      text += normalizedCharacter;
-      offsets.push(startOffset);
-      endOffsets.push(offset);
-    }
-  }
-
-  return {text, offsets, endOffsets};
-}
-
-function expandQuery(query: string, synonymGroups: SynonymGroup[]): string[] {
-  const variants = new Set([query]);
-  const normalizedQuery = normalizeSearchText(query);
-
-  synonymGroups.forEach(({terms}) => {
-    const normalizedTerms = terms.map(normalizeSearchText);
-    if (normalizedTerms.some((term) => normalizedQuery.includes(term))) {
-      terms.forEach((term) => variants.add(term));
-    }
-  });
-
-  return Array.from(variants);
-}
-
-function getBusinessPriority(document: SearchDocument): number {
-  if (typeof document.business_priority === 'number') {
-    return document.business_priority;
-  }
-
-  const url = (document.url ?? '').toLowerCase();
-  const section = (document.section ?? '').toLowerCase();
-
-  if (url.includes('/product-guides/') || section === '产品指南' || section === '帮助文档') {
-    return 30;
-  }
-  if (
-    url.includes('/faq/') ||
-    section.includes('faq') ||
-    section.includes('常见问题')
-  ) {
-    return 20;
-  }
-  if (
-    url.includes('/release-notes/') ||
-    section.includes('更新日志') ||
-    section.includes('更新动态')
-  ) {
-    return 10;
-  }
-
-  return 0;
-}
-
-function findSearchMatches(value: string, variants: string[]): SearchMatch[] {
-  const normalizedValue = normalizeSearchTextWithMap(value);
-  const normalizedVariants = Array.from(
-    new Set(variants.map(normalizeSearchText).filter(Boolean)),
-  ).sort((left, right) => right.length - left.length);
-  const matches: SearchMatch[] = [];
-
-  normalizedVariants.forEach((variant) => {
-    let searchFrom = 0;
-    while (searchFrom < normalizedValue.text.length) {
-      const matchIndex = normalizedValue.text.indexOf(variant, searchFrom);
-      if (matchIndex === -1) break;
-
-      const matchEndIndex = matchIndex + variant.length - 1;
-      const start = normalizedValue.offsets[matchIndex];
-      const end = normalizedValue.endOffsets[matchEndIndex];
-      if (start !== undefined && end !== undefined) {
-        matches.push({start, end});
-      }
-      searchFrom = matchIndex + variant.length;
-    }
-  });
-
-  return matches
-    .sort((left, right) => left.start - right.start || right.end - left.end)
-    .reduce<SearchMatch[]>((merged, match) => {
-      const previous = merged[merged.length - 1];
-      if (previous && match.start < previous.end) {
-        previous.end = Math.max(previous.end, match.end);
-      } else {
-        merged.push({...match});
-      }
-      return merged;
-    }, []);
-}
-
-type SearchQueryTerms = {primary: string[]; fragments: string[]};
-
-function buildSearchQueryTerms(variants: string[]): SearchQueryTerms {
-  const primary = new Set<string>();
-  const fragments = new Set<string>();
-
-  variants.forEach((variant) => {
-    extractSearchTokens(variant).forEach((token) => {
-      primary.add(token);
-      const characters = Array.from(token);
-      if (/^\p{Script=Han}+$/u.test(token) && characters.length >= 3) {
-        for (let index = 0; index < characters.length - 1; index += 1) {
-          fragments.add(characters.slice(index, index + 2).join(''));
-        }
-      }
-    });
-  });
-
-  return {primary: Array.from(primary), fragments: Array.from(fragments)};
-}
-
-function extractSearchTokens(value: string): string[] {
-  return value.toLowerCase().match(/[\p{Script=Han}]+|[a-z0-9]+/giu) ?? [];
-}
-
-function getSearchHighlightTerms(variants: string[]): string[] {
-  const {primary, fragments} = buildSearchQueryTerms(variants);
-  return Array.from(new Set([...variants, ...primary, ...fragments]))
-    .map(normalizeSearchText)
-    .filter(Boolean)
-    .sort((left, right) => right.length - left.length);
-}
-
-function createSearchSnippet(document: SearchDocument, variants: string[]): SearchSnippet {
-  const content = String(document.content ?? '').trim();
-  if (!content) return {text: '', matches: []};
-
-  const normalizedContent = normalizeSearchTextWithMap(content);
-  let matchIndex = -1;
-  let matchedLength = 0;
-
-  for (const variant of variants) {
-    if (!variant) continue;
-    const index = normalizedContent.text.indexOf(variant);
-    if (index !== -1 && (matchIndex === -1 || index < matchIndex)) {
-      matchIndex = index;
-      matchedLength = variant.length;
-    }
-  }
-
-  if (matchIndex === -1) {
-    const {primary, fragments} = buildSearchQueryTerms(variants);
-    for (const term of [...primary, ...fragments]) {
-      const index = normalizedContent.text.indexOf(term);
-      if (index !== -1 && (matchIndex === -1 || index < matchIndex)) {
-        matchIndex = index;
-        matchedLength = term.length;
-      }
-    }
-  }
-
-  const highlightTerms = getSearchHighlightTerms(variants);
-
-  if (matchIndex === -1) {
-    const fallback = content.replace(/\s+/g, ' ').trim();
-    const text = fallback.length > 180 ? `${fallback.slice(0, 180).trimEnd()}...` : fallback;
-    return {text, matches: findSearchMatches(text, highlightTerms)};
-  }
-
-  const matchStart = normalizedContent.offsets[matchIndex] ?? 0;
-  const matchEndIndex = matchIndex + matchedLength - 1;
-  const matchEnd = normalizedContent.endOffsets[matchEndIndex] ?? content.length;
-  const start = Math.max(0, matchStart - 90);
-  const end = Math.min(content.length, matchEnd + 150);
-  const snippet = content.slice(start, end).replace(/\s+/g, ' ').trim();
-  const text = `${start > 0 ? '...' : ''}${snippet}${end < content.length ? '...' : ''}`;
-
-  return {text, matches: findSearchMatches(text, highlightTerms)};
+function shouldRequestRelaxedCandidates(query: string): boolean {
+  const terms = query.toLowerCase().match(/[\p{Script=Han}]+|[a-z0-9]+/giu) ?? [];
+  const chineseCharacterCount = Array.from(query).filter((character) =>
+    /\p{Script=Han}/u.test(character),
+  ).length;
+  // Chinese phrases are commonly entered without spaces, so one Han token can
+  // still contain several meaningful search terms. Only relax longer phrases
+  // to avoid the extra candidate request for short, well-recalled queries.
+  return terms.length > 1 || chineseCharacterCount >= 6;
 }
 
 function searchLocalDocuments(
@@ -308,89 +158,44 @@ function searchLocalDocuments(
   page: number,
   perPage: number,
 ): SearchPageResult {
-  const normalizedQuery = normalizeSearchText(query);
-  const variants = expandQuery(query, synonymGroups).map(normalizeSearchText);
-  const queryTerms = buildSearchQueryTerms([normalizedQuery]);
-  const variantTerms = buildSearchQueryTerms(variants);
-  const fields: Array<[keyof SearchDocument, number]> = [
-    ['title', 100],
-    ['section', 80],
-    ['keywords', 70],
-    ['tags', 50],
-    ['breadcrumb', 30],
-    ['content', 10],
-  ];
-  const bestByDocument = new Map<
+  const variants = expandSearchQuery(query, synonymGroups).map(normalizeSearchText);
+  const matchesByDocument = new Map<
     string,
-    {document: SearchDocument; score: number; businessPriority: number}
+    Array<{document: SearchDocument; score: number; businessPriority: number}>
   >();
 
   documents.forEach((document) => {
-    let score = 0;
-    const matchedPrimaryTerms = new Set<string>();
-    const matchedFragments = new Set<string>();
-    fields.forEach(([field, weight]) => {
-      const values = Array.isArray(document[field])
-        ? (document[field] as string[])
-        : [String(document[field] ?? '')];
-      const value = normalizeSearchText(values.join(' '));
-      queryTerms.primary.forEach((term) => {
-        if (value.includes(term)) matchedPrimaryTerms.add(term);
-      });
-
-      const exactVariant = variants.find((variant) => variant && value.includes(variant));
-      if (exactVariant) {
-        score += weight * (exactVariant === normalizedQuery ? 2 : 1.2);
-        if (value.startsWith(exactVariant)) score += Math.round(weight * 0.2);
-        return;
-      }
-
-      const matchedTerms = variantTerms.primary.filter((term) => value.includes(term));
-      if (matchedTerms.length > 0) {
-        score += Math.min(weight * 1.25, matchedTerms.length * weight * 0.42);
-        return;
-      }
-
-      const matchedFieldFragments = variantTerms.fragments.filter((fragment) =>
-        value.includes(fragment),
-      );
-      matchedFieldFragments.forEach((fragment) => matchedFragments.add(fragment));
-      score += Math.min(weight * 0.8, matchedFieldFragments.length * weight * 0.18);
-    });
-
-    if (queryTerms.primary.length > 0 && matchedPrimaryTerms.size > 0) {
-      score += 18 * (matchedPrimaryTerms.size / queryTerms.primary.length);
-    } else if (matchedFragments.size > 0) {
-      score += Math.min(12, matchedFragments.size * 2);
-    }
-
-    if (
-      queryTerms.primary.length > 0 &&
-      matchedPrimaryTerms.size === 0 &&
-      matchedFragments.size < getMinimumFragmentMatches(variantTerms.fragments.length)
-    ) {
-      return;
-    }
+    const score = scoreSearchDocument(document, variants);
     if (score === 0) return;
     const key = document.doc_id ?? document.url ?? document.title ?? '';
-    const businessPriority = getBusinessPriority(document);
-    const previous = bestByDocument.get(key);
-    if (
-      !previous ||
-      score > previous.score ||
-      (score === previous.score && businessPriority > previous.businessPriority)
-    ) {
-      bestByDocument.set(key, {document, score, businessPriority});
-    }
+    const businessPriority = getSearchBusinessPriority(document);
+    const matches = matchesByDocument.get(key) ?? [];
+    matches.push({document, score, businessPriority});
+    matchesByDocument.set(key, matches);
   });
 
-  const ranked = Array.from(bestByDocument.values())
+  const ranked = Array.from(matchesByDocument.values())
+    .map((matches) => {
+      const sortedMatches = [...matches].sort(
+        (left, right) =>
+          right.score - left.score ||
+          right.businessPriority - left.businessPriority ||
+          (left.document.title ?? '').localeCompare(right.document.title ?? '', 'zh-CN') ||
+          (left.document.url ?? '').localeCompare(right.document.url ?? ''),
+      );
+      const best = sortedMatches[0];
+      return {
+        documents: sortedMatches.slice(0, GROUP_HIT_LIMIT).map((match) => match.document),
+        score: best.score,
+        businessPriority: best.businessPriority,
+      };
+    })
     .sort(
       (left, right) =>
         right.score - left.score ||
         right.businessPriority - left.businessPriority ||
-        (left.document.title ?? '').localeCompare(right.document.title ?? '', 'zh-CN') ||
-        (left.document.url ?? '').localeCompare(right.document.url ?? ''),
+        (left.documents[0]?.title ?? '').localeCompare(right.documents[0]?.title ?? '', 'zh-CN') ||
+        (left.documents[0]?.url ?? '').localeCompare(right.documents[0]?.url ?? ''),
     );
   const safePage = Math.max(1, Math.floor(page) || 1);
   const totalPages = getTotalPages(ranked.length, perPage);
@@ -401,10 +206,18 @@ function searchLocalDocuments(
     found: ranked.length,
     page: resolvedPage,
     perPage,
-    hits: ranked.slice(start, start + perPage).map(({document}) => {
-      const snippet = createSearchSnippet(document, variants);
+    hits: ranked.slice(start, start + perPage).map(({documents: matchedDocuments}) => {
+      const {displayDocument, snippetDocuments} = selectGroupedSearchResult(
+        matchedDocuments,
+        variants,
+      );
+      const snippet = createMultiSearchSnippet(
+        snippetDocuments.length > 0 ? snippetDocuments : matchedDocuments,
+        variants,
+      );
       return {
-        document,
+        document: displayDocument ?? matchedDocuments[0],
+        matchingDocuments: snippetDocuments,
         snippet: snippet.text,
         snippetMatches: snippet.matches,
       };
@@ -416,21 +229,21 @@ function getTotalPages(found: number, perPage: number): number {
   return found > 0 ? Math.ceil(found / perPage) : 0;
 }
 
-function getMinimumFragmentMatches(fragmentCount: number): number {
-  if (fragmentCount === 0) return 0;
-  return Math.min(fragmentCount, Math.max(2, Math.ceil(fragmentCount * 0.5)));
-}
-
 function getResultSnippet(result: SearchHit, query: string): ResultSnippet {
   const contentHighlight = result.highlights?.find(
     (highlight) => highlight.field === 'content' && highlight.snippet,
   );
-  const generatedSnippet = result.document
-    ? createSearchSnippet(result.document, [normalizeSearchText(query)])
-    : {text: '', matches: []};
+  const generatedSnippet = createMultiSearchSnippet(
+    result.matchingDocuments?.length
+      ? result.matchingDocuments
+      : result.document
+        ? [result.document]
+        : [],
+    [query],
+  );
 
-  if (contentHighlight?.snippet) {
-    return {text: contentHighlight.snippet, matches: [], source: 'typesense'};
+  if (generatedSnippet.text) {
+    return {...generatedSnippet, source: 'local'};
   }
   if (result.snippet !== undefined) {
     return {
@@ -438,6 +251,9 @@ function getResultSnippet(result: SearchHit, query: string): ResultSnippet {
       matches: result.snippetMatches ?? [],
       source: result.snippetMatches !== undefined ? 'local' : 'typesense',
     };
+  }
+  if (contentHighlight?.snippet) {
+    return {text: contentHighlight.snippet, matches: [], source: 'typesense'};
   }
   const fallbackHighlight = result.highlights?.find((highlight) => highlight.snippet)?.snippet;
   if (fallbackHighlight) {
@@ -487,12 +303,87 @@ function renderSearchSnippet(snippet: ResultSnippet): ReactNode {
     : renderLocalSnippet(snippet.text, snippet.matches);
 }
 
+function renderHighlightedSearchText(value: string, query: string): ReactNode {
+  return renderLocalSnippet(
+    value,
+    findSearchMatches(value, getSearchHighlightTerms([query])),
+  );
+}
+
+function createGroupedSearchHit(hits: SearchHit[], variants: string[]): SearchHit {
+  const documents = hits
+    .map((hit) => hit.document)
+    .filter((document): document is SearchDocument => Boolean(document));
+  const {displayDocument, snippetDocuments} = selectGroupedSearchResult(documents, variants);
+  const selectedHit = hits.find((hit) => hit.document === displayDocument) ?? hits[0];
+
+  return {
+    ...selectedHit,
+    document: displayDocument ?? selectedHit?.document,
+    matchingDocuments: snippetDocuments,
+  };
+}
+
+function getDocumentsFromHits(hits: SearchHit[]): SearchDocument[] {
+  return hits
+    .map((hit) => hit.document)
+    .filter((document): document is SearchDocument => Boolean(document));
+}
+
+function getSearchDocumentKey(document: SearchDocument | undefined): string {
+  return document?.doc_id ?? document?.url ?? document?.title ?? '';
+}
+
+function getSearchHitBusinessScore(hit: SearchHit, variants: string[]): number {
+  const documents = [hit.document, ...(hit.matchingDocuments ?? [])].filter(
+    (document): document is SearchDocument => Boolean(document),
+  );
+  return documents.reduce(
+    (best, document) => Math.max(best, scoreSearchDocument(document, variants)),
+    0,
+  );
+}
+
+function mergeGroupedSearchHits(
+  primaryGroups: SearchHit[][],
+  fallbackGroups: SearchHit[][],
+): SearchHit[][] {
+  const groups = new Map<string, SearchHit[]>();
+  [...primaryGroups, ...fallbackGroups].forEach((hits, groupIndex) => {
+    const documents = getDocumentsFromHits(hits);
+    const firstDocument = documents[0];
+    const key = getSearchDocumentKey(firstDocument) || `group:${groupIndex}`;
+    const mergedHits = groups.get(key) ?? [];
+    const existingRecordKeys = new Set(
+      mergedHits.map((hit) =>
+        hit.document?.id ??
+        `${hit.document?.url ?? ''}:${hit.document?.record_type ?? ''}:${hit.document?.title ?? ''}`,
+      ),
+    );
+    hits.forEach((hit) => {
+      const recordKey =
+        hit.document?.id ??
+        `${hit.document?.url ?? ''}:${hit.document?.record_type ?? ''}:${hit.document?.title ?? ''}`;
+      if (!hit.document || existingRecordKeys.has(recordKey)) return;
+      existingRecordKeys.add(recordKey);
+      mergedHits.push(hit);
+    });
+    groups.set(key, mergedHits);
+  });
+  return Array.from(groups.values());
+}
+
+function createExactDocumentFilter(documentId: string): string {
+  return `doc_id:=${JSON.stringify(documentId)} && record_type:=section`;
+}
+
 export default function SearchPage(): ReactNode {
   const {siteConfig} = useDocusaurusContext();
   const searchPath = useBaseUrl('/search');
   const searchIndexPath = useBaseUrl('/search-records.json');
   const searchSynonymsPath = useBaseUrl('/search-synonyms.json');
   const localIndexPromise = useRef<Promise<LocalSearchData> | null>(null);
+  const synonymGroupsPromise = useRef<Promise<SynonymGroup[]> | null>(null);
   const customFields = (siteConfig.customFields ?? {}) as {
     typesense?: {
       host?: string;
@@ -502,6 +393,7 @@ export default function SearchPage(): ReactNode {
   };
   const [query, setQuery] = useState('');
   const [state, setState] = useState<SearchState>('idle');
+  const [showLoading, setShowLoading] = useState(false);
   const [results, setResults] = useState<SearchHit[]>([]);
   const [totalResults, setTotalResults] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
@@ -510,21 +402,34 @@ export default function SearchPage(): ReactNode {
   const typesense = customFields.typesense ?? {};
   const canUseTypesense = Boolean(typesense.host && typesense.searchApiKey);
 
+  function getSynonymGroups() {
+    if (!synonymGroupsPromise.current) {
+      synonymGroupsPromise.current = fetch(searchSynonymsPath)
+        .then(async (response) => {
+          if (!response.ok) return [];
+          const synonyms: unknown = await response.json();
+          return Array.isArray(synonyms) ? (synonyms as SynonymGroup[]) : [];
+        })
+        .catch(() => []);
+    }
+
+    return synonymGroupsPromise.current;
+  }
+
   function getLocalDocuments() {
     if (!localIndexPromise.current) {
       localIndexPromise.current = Promise.all([
         fetch(searchIndexPath),
-        fetch(searchSynonymsPath),
+        getSynonymGroups(),
       ])
-        .then(async ([documentsResponse, synonymsResponse]) => {
+        .then(async ([documentsResponse, synonymGroups]) => {
           if (!documentsResponse.ok) {
             throw new Error(`Local search index responded with ${documentsResponse.status}`);
           }
           const documents: unknown = await documentsResponse.json();
-          const synonyms: unknown = synonymsResponse.ok ? await synonymsResponse.json() : [];
           return {
             documents: Array.isArray(documents) ? (documents as SearchDocument[]) : localDocuments,
-            synonymGroups: Array.isArray(synonyms) ? (synonyms as SynonymGroup[]) : [],
+            synonymGroups,
           };
         })
         .catch(() => ({documents: localDocuments, synonymGroups: []}));
@@ -567,6 +472,12 @@ export default function SearchPage(): ReactNode {
     const host = typesense.host?.replace(/\/$/, '');
     const collection = typesense.collection || 'qingflow_help_docs';
     try {
+      const synonymGroups = await getSynonymGroups();
+      const queryVariants = expandSearchQuery(trimmedQuery, synonymGroups);
+      const searchQuery = buildSearchQuery(trimmedQuery, synonymGroups);
+      const isNaturalLanguageQuery =
+        normalizeSearchText(searchQuery) !== normalizeSearchText(trimmedQuery);
+      const requestRelaxedCandidates = shouldRequestRelaxedCandidates(searchQuery);
       const response = await fetch(`${host}/multi_search`, {
         method: 'POST',
         headers: {
@@ -575,23 +486,26 @@ export default function SearchPage(): ReactNode {
         },
         body: JSON.stringify({
           searches: [
-            {
-              collection,
-              q: trimmedQuery,
-              query_by: 'title,section,keywords,tags,breadcrumb,content',
-              query_by_weights: '12,10,8,6,4,1',
-              highlight_fields: 'title,section,keywords,content',
-              prioritize_exact_match: true,
-              prioritize_token_position: true,
-              text_match_type: 'max_score',
-              prefix: 'true,true,true,true,false,false',
-              num_typos: 1,
+            createTypesenseSearch(collection, searchQuery, {
               page: nextPage,
-              per_page: PAGE_SIZE,
-              group_by: 'doc_id',
-              group_limit: 1,
-              sort_by: '_text_match:desc,business_priority:desc,updated_at_ts:desc',
-            },
+              perPage: PAGE_SIZE,
+              groupByDocument: true,
+              excludeFields: 'search_tokens',
+              textMatchType: isNaturalLanguageQuery ? 'max_weight' : 'max_score',
+            }),
+            ...(requestRelaxedCandidates
+              ? [
+                  createTypesenseSearch(collection, searchQuery, {
+                    page: 1,
+                    perPage: RELAXED_CANDIDATE_LIMIT,
+                    groupByDocument: true,
+                    dropTokensThreshold: PAGE_SIZE,
+                    excludeFields: 'content,search_tokens',
+                    groupLimit: 1,
+                    textMatchType: isNaturalLanguageQuery ? 'max_weight' : 'max_score',
+                  }),
+                ]
+              : []),
           ],
         }),
       });
@@ -602,17 +516,100 @@ export default function SearchPage(): ReactNode {
 
       const payload = await response.json();
       const searchResult = payload.results?.[0] ?? {};
-      const groupedHits = Array.isArray(searchResult.grouped_hits)
-        ? searchResult.grouped_hits.flatMap((group: {hits?: SearchHit[]}) => group.hits ?? [])
-        : [];
-      const hits = groupedHits.length > 0
-        ? groupedHits
-        : Array.isArray(searchResult.hits)
-          ? searchResult.hits
-          : [];
-      const found = Number.isFinite(searchResult.found)
+      const strictFound = Number.isFinite(searchResult.found)
         ? Math.max(0, Number(searchResult.found))
-        : hits.length;
+        : 0;
+      const strictGroups = getGroupedSearchHits(searchResult) as SearchHit[][];
+      const relaxedSearchResult = requestRelaxedCandidates
+        ? payload.results?.[1] ?? {}
+        : {};
+      const relaxedGroups = getGroupedSearchHits(relaxedSearchResult) as SearchHit[][];
+      const useRelaxedCandidates = strictFound < PAGE_SIZE && relaxedGroups.length > 0;
+      const groupedSearchHits = useRelaxedCandidates
+        ? mergeGroupedSearchHits(strictGroups, relaxedGroups)
+        : strictGroups;
+      const missingSectionDetails = groupedSearchHits
+        .map((hits, index) => ({
+          index,
+          documentId: getDocumentsFromHits(hits)[0]?.doc_id,
+          documents: getDocumentsFromHits(hits),
+        }))
+        .filter(
+          (group): group is {index: number; documentId: string; documents: SearchDocument[]} =>
+            !useRelaxedCandidates &&
+            Boolean(group.documentId) &&
+            !hasMatchingSection(group.documents, queryVariants),
+        );
+      const detailDocumentsByGroup = new Map<number, SearchDocument[]>();
+
+      if (missingSectionDetails.length > 0) {
+        const detailsResponse = await fetch(`${host}/multi_search`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-TYPESENSE-API-KEY': typesense.searchApiKey ?? '',
+          },
+          body: JSON.stringify({
+            searches: missingSectionDetails.map(({documentId}) =>
+              createTypesenseSearch(collection, searchQuery, {
+                filterBy: createExactDocumentFilter(documentId),
+                excludeFields: 'search_tokens',
+                textMatchType: isNaturalLanguageQuery ? 'max_weight' : 'max_score',
+              }),
+            ),
+          }),
+        });
+        if (!detailsResponse.ok) {
+          throw new Error(`Search detail service responded with ${detailsResponse.status}`);
+        }
+        const detailPayload = await detailsResponse.json();
+        const detailResults = Array.isArray(detailPayload.results) ? detailPayload.results : [];
+        missingSectionDetails.forEach((group, index) => {
+          const detailHits = Array.isArray(detailResults[index]?.hits)
+            ? detailResults[index].hits as SearchHit[]
+            : [];
+          detailDocumentsByGroup.set(group.index, getDocumentsFromHits(detailHits));
+        });
+      }
+
+      const hits: SearchHit[] = groupedSearchHits.map((groupHits, index) => {
+        const detailDocuments = detailDocumentsByGroup.get(index) ?? [];
+        if (detailDocuments.length === 0) {
+          return createGroupedSearchHit(groupHits, queryVariants);
+        }
+        const mergedDocuments = mergeSearchDocuments(
+          detailDocuments,
+          getDocumentsFromHits(groupHits),
+        );
+        return createGroupedSearchHit(
+          mergedDocuments.map((document) => ({document})),
+          queryVariants,
+        );
+      });
+      const rankedHits = rankSearchResults(hits, queryVariants) as SearchHit[];
+      const strictDocumentKeys = new Set(
+        strictGroups
+          .map((group) => getSearchDocumentKey(getDocumentsFromHits(group)[0]))
+          .filter(Boolean),
+      );
+      const strictHits = rankedHits.filter((hit) =>
+        strictDocumentKeys.has(getSearchDocumentKey(hit.document)),
+      );
+      const relaxedHits = rankedHits.filter(
+        (hit) =>
+          !strictDocumentKeys.has(getSearchDocumentKey(hit.document)) &&
+          getSearchHitBusinessScore(hit, queryVariants) > 0,
+      );
+      const preferredRelaxedHits = [
+        ...relaxedHits.filter((hit) => hit.document?.record_type !== 'section'),
+        ...relaxedHits.filter((hit) => hit.document?.record_type === 'section'),
+      ].slice(0, RELAXED_RESULT_LIMIT);
+      const displayedHits = useRelaxedCandidates
+        ? rankSearchResults([...strictHits, ...preferredRelaxedHits], queryVariants)
+        : rankedHits;
+      const found = useRelaxedCandidates
+        ? displayedHits.length
+        : strictFound || hits.length;
       const resolvedPage = found > 0
         ? Math.min(nextPage, getTotalPages(found, PAGE_SIZE))
         : 1;
@@ -621,26 +618,31 @@ export default function SearchPage(): ReactNode {
         await runSearch(trimmedQuery, resolvedPage);
         return;
       }
-      setResults(hits);
+      setResults(displayedHits);
       setTotalResults(found);
       setCurrentPage(resolvedPage);
       setState('ready');
     } catch {
-      const documents = await getLocalDocuments();
-      const localResult = searchLocalDocuments(
-        trimmedQuery,
-        documents.documents,
-        documents.synonymGroups,
-        nextPage,
-        PAGE_SIZE,
-      );
-      setResults(localResult.hits);
-      setTotalResults(localResult.found);
-      setCurrentPage(localResult.page);
-      setState('ready');
-      setNotice('在线搜索暂不可用，已显示站内索引结果。');
+      // A configured Typesense service must fail explicitly. Automatically
+      // downloading the full local index here makes a transient online error
+      // look like a frozen search page.
+      setResults([]);
+      setTotalResults(0);
+      setCurrentPage(1);
+      setState('error');
+      setNotice('搜索服务暂时不可用，请稍后重试。');
     }
   }
+
+  useEffect(() => {
+    if (state !== 'loading') {
+      setShowLoading(false);
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => setShowLoading(true), SEARCH_LOADING_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [state]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -660,10 +662,10 @@ export default function SearchPage(): ReactNode {
     window.history.replaceState({}, '', nextUrl);
   }
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    updateUrl(query, 1);
-    void runSearch(query, 1);
+  function handleSubmit(nextQuery: string) {
+    setQuery(nextQuery);
+    updateUrl(nextQuery, 1);
+    void runSearch(nextQuery, 1);
   }
 
   function handleSuggestion(nextQuery: string) {
@@ -692,24 +694,16 @@ export default function SearchPage(): ReactNode {
               </p>
               <Heading as="h1">搜索帮助文档</Heading>
               <p>描述你遇到的问题，查找相关功能说明、操作步骤和最佳实践。</p>
-              <form className={styles.searchForm} onSubmit={handleSubmit}>
-                <Search aria-hidden="true" size={21} />
-                <input
-                  className={styles.searchInput}
-                  type="search"
-                  placeholder="例如：审批中心怎么配置"
-                  aria-label="搜索帮助文档"
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  autoFocus
-                />
-                <button
-                  type="submit"
-                  data-umami-event="search"
-                  data-umami-event-location="search-page">
-                  搜索 <ArrowRight aria-hidden="true" size={18} />
-                </button>
-              </form>
+              <SearchCombobox
+                value={query}
+                onChange={setQuery}
+                onSubmit={handleSubmit}
+                variant="search-page"
+                analyticsLocation="search-page"
+                inputId="docs-search"
+                placeholder="例如：审批中心怎么配置"
+                autoFocus
+              />
               <div className={styles.suggestions}>
                 <span>热门搜索</span>
                 {['导入 Markdown 文档', '审批中心怎么配置', '私有化部署拓扑'].map(
@@ -730,7 +724,7 @@ export default function SearchPage(): ReactNode {
         <section className={styles.resultsSection}>
           <div className="container">
             <div className={styles.resultsInner}>
-              {state === 'loading' ? (
+              {state === 'loading' && showLoading ? (
                 <div className={styles.stateMessage}>
                   <LoaderCircle className={styles.spinner} aria-hidden="true" size={24} />
                   正在查找相关文档...
@@ -766,33 +760,44 @@ export default function SearchPage(): ReactNode {
               <div className={styles.results}>
                 {results.map((result, index) => {
                   const document = result.document ?? {};
-                  const resultTitle =
+                  const sectionTitle =
                     document.record_type === 'section'
                       ? document.section ?? document.title
                       : document.title;
-                  const snippet =
-                    getResultSnippet(result, query);
-                  const tags = document.tags ?? [];
+                  const documentTitle = document.document_title ?? document.title;
+                  const snippet = getResultSnippet(result, query);
+                  const breadcrumbItems = String(
+                    document.breadcrumb ?? document.section ?? '帮助文档',
+                  )
+                    .split(/\s+\/\s+/u)
+                    .map((item) => item.trim())
+                    .filter(Boolean);
+                  const destination = addSearchHighlightToUrl(
+                    document.url ?? '/docs/getting-started',
+                    query,
+                  );
 
                   return (
                     <article key={`${document.url ?? 'result'}-${index}`} className={styles.resultRow}>
-                      <Link to={document.url ?? '/docs/getting-started'}>
+                      <Link to={destination}>
                         <div className={styles.resultTopline}>
-                          <span>{document.section ?? '帮助文档'}</span>
-                          {document.version ? <small>{document.version}</small> : null}
+                          {breadcrumbItems.map((item, breadcrumbIndex) => (
+                            <span
+                              className={styles.breadcrumbItem}
+                              key={`${item}-${breadcrumbIndex}`}>
+                              {item}
+                            </span>
+                          ))}
                         </div>
-                        <Heading as="h2">{resultTitle ?? '未命名文档'}</Heading>
-                        {document.record_type === 'section' && document.title ? (
-                          <p className={styles.resultBreadcrumb}>{document.title}</p>
+                        <Heading as="h2">
+                          {renderHighlightedSearchText(sectionTitle ?? '未命名段落', query)}
+                        </Heading>
+                        {documentTitle && documentTitle !== sectionTitle ? (
+                          <p className={styles.resultDocumentTitle}>
+                            {renderHighlightedSearchText(documentTitle, query)}
+                          </p>
                         ) : null}
                         <p>{renderSearchSnippet(snippet)}</p>
-                        {tags.length > 0 ? (
-                          <div className={styles.tagRow}>
-                            {tags.slice(0, 4).map((tag) => (
-                              <span key={tag}>{tag}</span>
-                            ))}
-                          </div>
-                        ) : null}
                         <ChevronRight className={styles.resultArrow} aria-hidden="true" size={21} />
                       </Link>
                     </article>

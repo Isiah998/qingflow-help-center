@@ -1,6 +1,14 @@
+import {existsSync} from 'node:fs';
+import path from 'node:path';
+import {loadEnvFile} from 'node:process';
 import {themes as prismThemes} from 'prism-react-renderer';
 import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
+
+for (const fileName of ['.env.local', '.env']) {
+  const filePath = path.join(process.cwd(), fileName);
+  if (existsSync(filePath)) loadEnvFile(filePath);
+}
 
 const isGitHubPages = process.env.GITHUB_PAGES === 'true';
 const siteUrl =
@@ -11,6 +19,17 @@ const siteUrl =
 const baseUrl =
   process.env.DOCS_BASE_URL ??
   (isGitHubPages ? '/qingflow-help-center/' : '/');
+const docsContentSource = (process.env.DOCS_CONTENT_SOURCE ?? 'outline')
+  .trim()
+  .toLowerCase();
+
+if (!['outline', 'legacy'].includes(docsContentSource)) {
+  throw new Error(
+    `Unsupported DOCS_CONTENT_SOURCE: ${docsContentSource}. Expected "outline" or "legacy".`,
+  );
+}
+
+const useLegacyContent = docsContentSource === 'legacy';
 
 const config: Config = {
   title: '轻流帮助中心',
@@ -47,10 +66,18 @@ const config: Config = {
       {
         docs: {
           routeBasePath: 'docs',
-          sidebarPath: './sidebars.ts',
-          editUrl:
-            process.env.GITHUB_EDIT_URL ??
-            'https://github.com/nonepointer666/qingflow-help-center/tree/main/',
+          sidebarPath: useLegacyContent
+            ? './sidebars.ts'
+            : './sidebars.generated.ts',
+          exclude: useLegacyContent ? ['generated/**'] : ['migrated/**'],
+          // Outline document IDs are UUID filenames. A numeric UUID prefix must
+          // remain part of its Docusaurus document ID rather than be treated as
+          // a sidebar ordering prefix.
+          numberPrefixParser: useLegacyContent,
+          editUrl: useLegacyContent
+            ? process.env.GITHUB_EDIT_URL ??
+              'https://github.com/nonepointer666/qingflow-help-center/tree/main/'
+            : undefined,
           showLastUpdateTime: false,
           showLastUpdateAuthor: false,
         },
@@ -64,6 +91,7 @@ const config: Config = {
   plugins: [
     './plugins/legacy-url-redirects.mjs',
     './plugins/build-metadata.mjs',
+    './plugins/disable-dev-compression.mjs',
   ],
   themeConfig: {
     image: 'img/qingflow-social-card.svg',
@@ -198,7 +226,9 @@ const config: Config = {
       'https://github.com/nonepointer666/qingflow-help-center/tree/main/',
     typesense: {
       host: process.env.TYPESENSE_HOST ?? '',
-      searchApiKey: process.env.TYPESENSE_SEARCH_API_KEY ?? '',
+      searchApiKey:
+        process.env.TYPESENSE_SEARCH_API_KEY?.trim() ||
+        '',
       collection: process.env.TYPESENSE_COLLECTION ?? 'qingflow_help_docs',
     },
   },
