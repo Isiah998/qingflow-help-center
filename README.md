@@ -85,28 +85,19 @@ stored in an image layer:
 docker build --secret id=outline_api_token,env=OUTLINE_API_TOKEN .
 ```
 
-## GitHub Pages deployment
+## GitHub pull request validation
 
-Every update to `main` is synchronized, validated, built, and deployed by
-`.github/workflows/docs-ci.yml`. Production builds run on a self-hosted runner
-whose outbound IP must be allowed by Outline. Pull requests use the retained
-legacy snapshot and do not receive the Outline secret. The published site is
-available at:
-
-`https://nonepointer666.github.io/qingflow-help-center/`
-
-The workflow automatically switches Docusaurus to the repository base path during
-the Pages build. Local development and custom-domain builds continue to use `/`.
-
-In the GitHub repository, set **Settings > Pages > Build and deployment > Source**
-to **GitHub Actions** once. You can also run the workflow manually from the Actions
-page through `workflow_dispatch`.
+`.github/workflows/docs-ci.yml` validates pull requests with the retained legacy
+snapshot on a GitHub-hosted runner. It does not receive production secrets,
+synchronize Outline, publish Typesense records, or deploy the site. Production
+build and deployment are owned by Jenkins as described below.
 
 ## Search setup
 
 Copy `.env.example` into your runtime environment and provide:
 
-- `TYPESENSE_HOST`
+- `TYPESENSE_HOST` for server-side index administration
+- `TYPESENSE_SEARCH_HOST` for browser search requests
 - `TYPESENSE_COLLECTION`
 - `TYPESENSE_SEARCH_API_KEY` and `TYPESENSE_ADMIN_API_KEY`
 
@@ -123,6 +114,15 @@ The command creates a key scoped to `documents:search` for the configured
 collection and prints the generated key once. Store it as
 `TYPESENSE_SEARCH_API_KEY` in your local environment or secret store.
 
+For local development, set `TYPESENSE_SEARCH_HOST` to the browser-reachable
+Typesense URL, normally `http://localhost:8108`. The Kubernetes image defaults
+this value to the same-origin `/typesense` path. Its Nginx server exposes only
+`POST /typesense/multi_search` and proxies that request to
+`typesense-0.typesense-headless.outline.svc.cluster.local:8108`. This keeps the
+cluster-only hostname out of browser requests. The search key remains visible
+to the browser by design and must stay scoped to `documents:search`; never use
+the admin key as the search key.
+
 Then you can push search data:
 
 ```bash
@@ -135,6 +135,73 @@ site, reconciles the native Typesense v30 synonym set
 fields use the `zh` locale tokenizer, while `search_tokens` keeps overlapping
 Chinese n-grams available for mixed Chinese/English queries. Re-run
 `npm run build:index` before pushing whenever the content snapshot changes.
+
+## Jenkins and Kubernetes release
+
+Production releases use Jenkins rather than GitHub Pages. GitHub Actions only
+validates the retained legacy snapshot and does not need access to Outline or
+Typesense secrets.
+
+The Jenkins agent must run Linux with Node.js 20 or newer (Node.js 22 is
+recommended), npm, Git, Docker, and, when Jenkins performs the rollout,
+`kubectl`. It must have network access to Outline, the internal Typesense
+service, the container registry, and the Kubernetes API. Allocate at least 4 GiB
+of memory to the build agent; the release script supplies a 4 GiB Node.js heap
+limit unless `NODE_OPTIONS` is already configured.
+
+Configure these secret-text credentials as masked environment variables:
+
+- `OUTLINE_API_TOKEN`
+- `TYPESENSE_SEARCH_API_KEY`
+- `TYPESENSE_ADMIN_API_KEY`
+- `HARBOR_USERNAME` and `HARBOR_PASSWORD` when the Jenkins agent is not already
+  authenticated to Harbor
+
+Configure these non-secret environment variables:
+
+```text
+OUTLINE_URL=https://outline.dev.oalite.com
+OUTLINE_COLLECTION=售后知识库
+TYPESENSE_HOST=http://typesense-0.typesense-headless.outline.svc.cluster.local:8108
+TYPESENSE_SEARCH_HOST=/typesense
+TYPESENSE_COLLECTION=qingflow_help_docs
+IMAGE_REPOSITORY=harbor.oalite.com/<project>/qingflow-help-center
+DEPLOY_TO_K8S=true
+KUBE_NAMESPACE=default
+KUBE_DEPLOYMENT=qingflow-help-center
+KUBE_CONTAINER=help-center
+SMOKE_TEST_URL=http://qingflow-help-center.default.svc.cluster.local
+```
+
+Authenticate Docker to Harbor before running the release script. The Jenkins
+shell step can use:
+
+```bash
+printf '%s' "$HARBOR_PASSWORD" | docker login harbor.oalite.com \
+  --username "$HARBOR_USERNAME" --password-stdin
+bash scripts/jenkins-release.sh
+```
+
+The script installs locked dependencies, validates the project, synchronizes
+Outline exactly once, builds the site and search records from that snapshot,
+packages `build/` with `Dockerfile.runtime`, pushes an immutable
+`<git-sha>-<jenkins-build-number>-<search-snapshot-hash>` image, updates
+Typesense, and optionally waits for the Kubernetes rollout. Jenkins supplies
+`BUILD_NUMBER` automatically; an explicit `IMAGE_TAG` overrides the generated
+tag. Set `DEPLOY_TO_K8S=false` when another Jenkins stage or GitOps controller
+owns deployment. After a direct rollout, the script verifies both `/healthz`
+and an actual query through `/typesense/multi_search`;
+`SMOKE_TEST_URL` may instead point to the public HTTPS site when the Jenkins
+agent cannot resolve Kubernetes service DNS.
+
+Run this release step only for the protected production branch, mask every
+credential in Jenkins, and disable concurrent builds for the job so two content
+snapshots cannot update Typesense and Kubernetes at the same time.
+
+Configure the Jenkins job to run for protected-branch pushes and for the
+approved Outline webhook relay (with a periodic reconciliation build as a
+fallback). Every invocation performs a fresh full Outline sync; generated
+documents remain build artifacts and are not committed to Git.
 
 ## Key directories
 

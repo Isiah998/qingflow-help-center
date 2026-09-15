@@ -9,6 +9,7 @@
     "start:legacy": "cross-env DOCS_CONTENT_SOURCE=legacy npm run start:site",
     "start:site": "npm run mdx:normalize && npm run routes:check && npm run assets:check && npm run build:index && docusaurus start",
     "build": "npm run content:sync && npm run build:outline",
+    "build:jenkins": "npm run typecheck && npm test && npm run content:sync && npm run build:outline",
     "build:outline": "cross-env OUTLINE_API_TOKEN= DOCS_CONTENT_SOURCE=outline npm run build:active",
     "build:legacy": "cross-env DOCS_CONTENT_SOURCE=legacy npm run build:active",
     "build:active": "npm run mdx:normalize && npm run routes:check && npm run assets:check && npm run build:index && npm run build:site",
