@@ -4,12 +4,10 @@ import {
   DEFAULT_OUTLINE_COLLECTION,
   DEFAULT_OUTLINE_URL,
   assignDocumentRoutes,
-  createBootstrappedRouteMap,
   createOutlineClient,
   disableProxyForOutline,
   fetchOutlineSnapshot,
   generateOutlineOutput,
-  readLegacyRoutes,
   readRouteMap,
   writeJson,
 } from './lib/outline-sync.mjs';
@@ -23,7 +21,7 @@ loadLocalEnvironment(cwd);
 disableProxyForOutline();
 
 async function main() {
-  if (!['sync', 'bootstrap-routes'].includes(command)) {
+  if (command !== 'sync') {
     throw new Error(`Unknown command: ${command}`);
   }
 
@@ -35,13 +33,7 @@ async function main() {
     client,
     process.env.OUTLINE_COLLECTION ?? DEFAULT_OUTLINE_COLLECTION,
   );
-  const [legacyRoutes, routeMap] = await Promise.all([
-    readLegacyRoutes({
-      docsRoot: path.join(cwd, 'docs', 'migrated'),
-      sidebarFile: path.join(cwd, 'sidebars.ts'),
-    }),
-    readRouteMap(routeMapFile),
-  ]);
+  const routeMap = await readRouteMap(routeMapFile);
   if (
     routeMap.collection?.id &&
     routeMap.collection.id !== snapshot.collection.id
@@ -58,12 +50,12 @@ async function main() {
       `Outline route map belongs to collection ${routeMap.collection.name}, not ${snapshot.collection.name}.`,
     );
   }
-  if (command === 'sync' && !routeMap.collection?.id) {
+  if (!routeMap.collection?.id) {
     throw new Error(
-      'Outline route map has not been bootstrapped. Run npm run content:routes:bootstrap on an allowlisted runner and commit data/outline-route-map.json.',
+      'Outline route map is missing its production collection identity.',
     );
   }
-  const assignment = assignDocumentRoutes(snapshot.documents, legacyRoutes, routeMap);
+  const assignment = assignDocumentRoutes(snapshot.documents, [], routeMap);
 
   if (assignment.conflicts.length > 0) {
     await writeJson(conflictReportFile, {conflicts: assignment.conflicts});
@@ -71,12 +63,6 @@ async function main() {
       `Outline route assignment has ${assignment.conflicts.length} conflict(s). See .tmp/outline-route-conflicts.json.`,
     );
   }
-  if (command === 'bootstrap-routes') {
-    await writeJson(routeMapFile, createBootstrappedRouteMap(snapshot, assignment, routeMap));
-    console.log(`Stored stable routes for ${assignment.documents.length} Outline documents.`);
-    return;
-  }
-
   const report = await generateOutlineOutput({
     cwd,
     snapshot,

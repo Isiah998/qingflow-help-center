@@ -3,6 +3,7 @@ import {useState} from 'react';
 import Link from '@docusaurus/Link';
 import {useHistory} from '@docusaurus/router';
 import useBaseUrl from '@docusaurus/useBaseUrl';
+import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Layout from '@theme/Layout';
 import Heading from '@theme/Heading';
 import HomeFlowScene from '@site/src/components/HomeFlowScene';
@@ -34,11 +35,24 @@ type Guide = {
   keywords: string;
 };
 
-const guides: Guide[] = [
+type CoreDocRoutes = {
+  gettingStarted: string;
+  releaseNotes: string;
+  introduction: string;
+  collectData: string;
+  workflow: string;
+  permissions: string;
+  building: string;
+  openapi: string;
+};
+
+type GuideDefinition = Omit<Guide, 'to'> & {route: keyof CoreDocRoutes};
+
+const guideDefinitions: GuideDefinition[] = [
   {
     title: '快速开始',
     description: '认识轻流、了解核心概念，完成第一次应用搭建。',
-    to: '/docs/getting-started',
+    route: 'gettingStarted',
     icon: Sparkles,
     tone: 'green',
     keywords: '入门 开始 登录 创建应用 新手',
@@ -46,7 +60,7 @@ const guides: Guide[] = [
   {
     title: '应用与数据',
     description: '组织表单、导入数据，并为团队建立清晰的数据入口。',
-    to: '/docs/product-guides/qingflow-introduction/collect-and-route-data',
+    route: 'collectData',
     icon: Boxes,
     tone: 'coral',
     keywords: '应用 表单 数据 导入 markdown 内容',
@@ -54,7 +68,7 @@ const guides: Guide[] = [
   {
     title: '流程与审批',
     description: '设计业务流程、配置审批节点并追踪处理进度。',
-    to: '/docs/product-guides/workflow-engine',
+    route: 'workflow',
     icon: Workflow,
     tone: 'blue',
     keywords: '流程 审批 节点 待办 自动化',
@@ -62,7 +76,7 @@ const guides: Guide[] = [
   {
     title: '成员与权限',
     description: '管理成员、角色和内容边界，让协作安全可控。',
-    to: '/docs/product-guides/admin-console/permissions',
+    route: 'permissions',
     icon: ShieldCheck,
     tone: 'yellow',
     keywords: '成员 权限 角色 管理员 安全',
@@ -70,7 +84,7 @@ const guides: Guide[] = [
   {
     title: '开放平台',
     description: '通过 API 和集成能力连接现有系统与业务数据。',
-    to: '/docs/product-guides/qing-code/openapi',
+    route: 'openapi',
     icon: Code2,
     tone: 'mint',
     keywords: 'API 开发 接口 集成 webhook',
@@ -78,33 +92,37 @@ const guides: Guide[] = [
   {
     title: '搭建技巧',
     description: '按业务场景查找系统搭建方法和实用配置技巧。',
-    to: '/docs/building-guides/inventory-outbound-validation',
+    route: 'building',
     icon: Settings2,
     tone: 'ink',
     keywords: '搭建 技巧 场景 实践 配置',
   },
 ];
 
-const popularQuestions = [
+const popularQuestions: Array<{
+  title: string;
+  category: string;
+  route: keyof CoreDocRoutes;
+}> = [
   {
     title: '如何快速找到需要处理的审批任务？',
     category: '流程与审批',
-    to: '/docs/product-guides/workflow-engine',
+    route: 'workflow',
   },
   {
     title: '如何收集和流转业务数据？',
     category: '快速入门',
-    to: '/docs/product-guides/qingflow-introduction/collect-and-route-data',
+    route: 'collectData',
   },
   {
     title: '如何配置工作区权限？',
     category: '成员与权限',
-    to: '/docs/product-guides/admin-console/permissions',
+    route: 'permissions',
   },
   {
     title: '在哪里查看产品更新日志？',
     category: '更新动态',
-    to: '/docs/release-notes',
+    route: 'releaseNotes',
   },
 ];
 
@@ -147,6 +165,13 @@ function GuideCard({guide}: {guide: Guide}) {
 }
 
 export default function Home(): ReactNode {
+  const {siteConfig} = useDocusaurusContext();
+  const coreDocRoutes = (siteConfig.customFields?.coreDocRoutes ?? {}) as CoreDocRoutes;
+  const guides = guideDefinitions.map(({route, ...guide}) => ({
+    ...guide,
+    to: coreDocRoutes[route],
+  }));
+
   return (
     <Layout
       title="轻流帮助中心"
@@ -166,10 +191,10 @@ export default function Home(): ReactNode {
             <HelpSearch />
             <nav className={styles.quickLinks} aria-label="常用入口">
               <span>常用入口</span>
-              <Link to="/docs/getting-started">新手入门</Link>
-              <Link to="/docs/product-guides/workflow-engine">流程引擎</Link>
-              <Link to="/docs/product-guides/qing-code/openapi">API 文档</Link>
-              <Link to="/docs/release-notes">更新日志</Link>
+              <Link to={coreDocRoutes.gettingStarted}>新手入门</Link>
+              <Link to={coreDocRoutes.workflow}>流程引擎</Link>
+              <Link to={coreDocRoutes.openapi}>API 文档</Link>
+              <Link to={coreDocRoutes.releaseNotes}>更新日志</Link>
             </nav>
           </div>
         </div>
@@ -183,7 +208,7 @@ export default function Home(): ReactNode {
                 <p className={styles.sectionLabel}>浏览文档</p>
                 <Heading as="h2">你想了解什么？</Heading>
               </div>
-              <Link to="/docs/getting-started" className={styles.textLink}>
+              <Link to={coreDocRoutes.gettingStarted} className={styles.textLink}>
                 查看全部文档 <ArrowRight aria-hidden="true" size={17} />
               </Link>
             </div>
@@ -208,7 +233,7 @@ export default function Home(): ReactNode {
               </div>
               <div className={styles.questionList}>
                 {popularQuestions.map((question, index) => (
-                  <Link key={question.title} to={question.to} className={styles.questionRow}>
+                  <Link key={question.title} to={coreDocRoutes[question.route]} className={styles.questionRow}>
                     <span className={styles.questionIndex}>0{index + 1}</span>
                     <span className={styles.questionText}>
                       <strong>{question.title}</strong>
@@ -235,10 +260,10 @@ export default function Home(): ReactNode {
                 </div>
               </div>
               <div className={styles.supportActions}>
-                <Link className={styles.secondaryButton} to="/docs/getting-started">
+                <Link className={styles.secondaryButton} to={coreDocRoutes.gettingStarted}>
                   <BookOpen aria-hidden="true" size={18} /> 浏览目录
                 </Link>
-                <Link className={styles.primaryButton} to="/docs/product-guides/qingflow-introduction">
+                <Link className={styles.primaryButton} to={coreDocRoutes.introduction}>
                   <FileInput aria-hidden="true" size={18} /> 内容发布指南
                 </Link>
               </div>

@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  activateTypesenseAlias,
   createTypesenseSearchKey,
   buildTypesenseSynonyms,
   ensureTypesenseSynonyms,
+  getTypesenseAlias,
   getTypesenseSynonymSetName,
+  restoreTypesenseAlias,
+  setTypesenseAlias,
   syncTypesense,
+  validateTypesenseCollection,
 } from '../scripts/lib/typesense-sync.mjs';
 
 const host = 'https://typesense.example.com';
@@ -123,6 +128,111 @@ test('Typesense search key is scoped to search actions and the configured collec
     actions: ['documents:search'],
     collections: [collection],
   });
+});
+
+test('Typesense alias helpers read, update, and restore a stable alias', async () => {
+  const requests = [];
+  const alias = 'help_current';
+  const fetchImpl = async (url, options = {}) => {
+    requests.push({url, options});
+    if ((options.method ?? 'GET') === 'GET') {
+      return jsonResponse({name: alias, collection_name: 'help_v_old'});
+    }
+    return jsonResponse({name: alias, collection_name: 'help_v_new'});
+  };
+
+  assert.equal(
+    await getTypesenseAlias({host, apiKey, alias, fetchImpl}),
+    'help_v_old',
+  );
+  await setTypesenseAlias({
+    host,
+    apiKey,
+    alias,
+    collection: 'help_v_new',
+    fetchImpl,
+  });
+  await restoreTypesenseAlias({
+    host,
+    apiKey,
+    alias,
+    previousCollection: 'help_v_old',
+    fetchImpl,
+  });
+
+  assert.deepEqual(
+    requests.map(({options}) => options.method ?? 'GET'),
+    ['GET', 'PUT', 'PUT'],
+  );
+  assert.deepEqual(JSON.parse(requests[1].options.body), {
+    collection_name: 'help_v_new',
+  });
+  assert.deepEqual(JSON.parse(requests[2].options.body), {
+    collection_name: 'help_v_old',
+  });
+});
+
+test('Typesense collection validation checks the exact staged record count', async () => {
+  const requests = [];
+  const fetchImpl = async (url, options = {}) => {
+    requests.push({url, options});
+    return jsonResponse({results: [{found: 7, hits: []}]});
+  };
+
+  await validateTypesenseCollection({
+    host,
+    apiKey,
+    collection: 'help_v_release',
+    expectedRecords: 7,
+    fetchImpl,
+  });
+
+  assert.equal(requests[0].url, `${host}/multi_search`);
+  assert.equal(requests[0].options.method, 'POST');
+  assert.equal(requests[0].options.headers['X-TYPESENSE-API-KEY'], apiKey);
+  assert.deepEqual(JSON.parse(requests[0].options.body).searches[0], {
+    collection: 'help_v_release',
+    q: '*',
+    query_by: 'title',
+    per_page: 1,
+  });
+});
+
+test('Typesense alias activation restores the previous target when browser validation fails', async () => {
+  const alias = 'help_current';
+  const requests = [];
+  const fetchImpl = async (url, options = {}) => {
+    requests.push({url, options});
+    if (url === `${host}/multi_search`) {
+      return jsonResponse({message: 'forbidden'}, 403);
+    }
+    return jsonResponse({name: alias});
+  };
+
+  await assert.rejects(
+    activateTypesenseAlias({
+      host,
+      adminApiKey: apiKey,
+      searchApiKey: 'search-key',
+      alias,
+      collection: 'help_v_new',
+      previousCollection: 'help_v_old',
+      expectedRecords: 1,
+      fetchImpl,
+    }),
+    /Failed to validate Typesense collection: 403/,
+  );
+
+  const aliasUpdates = requests
+    .filter(({url, options}) => url.endsWith(`/aliases/${alias}`) && options.method === 'PUT')
+    .map(({options}) => JSON.parse(options.body).collection_name);
+  assert.deepEqual(aliasUpdates, ['help_v_new', 'help_v_old']);
+  assert.equal(
+    requests.find(({url}) => url === `${host}/multi_search`).options.headers[
+      'X-TYPESENSE-API-KEY'
+    ],
+    'search-key',
+  );
 });
 
 test('Typesense synonyms are reconciled through the native collection API', async () => {

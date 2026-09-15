@@ -30,6 +30,37 @@ if (!['outline', 'legacy'].includes(docsContentSource)) {
 }
 
 const useLegacyContent = docsContentSource === 'legacy';
+const coreDocRoutes = useLegacyContent
+  ? {
+      gettingStarted: '/docs/getting-started',
+      releaseNotes: '/docs/release-notes',
+      introduction: '/docs/product-guides/qingflow-introduction',
+      collectData: '/docs/product-guides/qingflow-introduction/collect-and-route-data',
+      workflow: '/docs/product-guides/workflow-engine',
+      admin: '/docs/product-guides/admin-console',
+      permissions: '/docs/product-guides/admin-console/permissions',
+      building: '/docs/building-guides/inventory-outbound-validation',
+      openapi: '/docs/product-guides/qing-code/openapi',
+      solutions: '/docs/solutions/inventory-management',
+      faq: '/docs/faq',
+      videos: '/docs/video-guides',
+      contact: '/docs/contact',
+    }
+  : {
+      gettingStarted: '/docs/outline/o8kebzouct',
+      releaseNotes: '/docs/outline/09v4h2x3bm',
+      introduction: '/docs/outline/d4flynedtc',
+      collectData: '/docs/outline/yy1mz1tlqh',
+      workflow: '/docs/outline/gvcngjozmh',
+      admin: '/docs/outline/9ie9aefkei',
+      permissions: '/docs/outline/otm2jfrh2g',
+      building: '/docs/outline/4kcf3aowp8',
+      openapi: '/docs/outline/4ki5mirbaj',
+      solutions: '/docs/outline/tye0qxvu6g',
+      faq: '/docs/outline/4ohkf9hiol',
+      videos: '/docs/outline/ldrdoionqu',
+      contact: '/docs/outline/vwdkk42e1f',
+    };
 
 const config: Config = {
   title: '轻流帮助中心',
@@ -89,7 +120,10 @@ const config: Config = {
     ],
   ],
   plugins: [
-    './plugins/legacy-url-redirects.mjs',
+    [
+      './plugins/legacy-url-redirects.mjs',
+      {includeOutlineRoutes: !useLegacyContent},
+    ],
     './plugins/build-metadata.mjs',
     './plugins/disable-dev-compression.mjs',
   ],
@@ -131,7 +165,7 @@ const config: Config = {
           position: 'left',
           label: '产品指南',
         },
-        {to: '/docs/release-notes', label: '更新日志', position: 'left'},
+        {to: coreDocRoutes.releaseNotes, label: '更新日志', position: 'left'},
         {
           href: 'https://qingflow.com/?utm_source=helpcenter',
           label: '官网',
@@ -167,11 +201,11 @@ const config: Config = {
           items: [
             {
               label: '新手指南',
-              to: '/docs/getting-started',
+              to: coreDocRoutes.gettingStarted,
             },
             {
               label: '轻流简介',
-              to: '/docs/product-guides/qingflow-introduction',
+              to: coreDocRoutes.introduction,
             },
             {
               label: '搜索文档',
@@ -186,15 +220,15 @@ const config: Config = {
           items: [
             {
               label: '管理后台',
-              to: '/docs/product-guides/admin-console',
+              to: coreDocRoutes.admin,
             },
             {
               label: '权限管理',
-              to: '/docs/product-guides/admin-console/permissions',
+              to: coreDocRoutes.permissions,
             },
             {
               label: '搭建技巧',
-              to: '/docs/building-guides/inventory-outbound-validation',
+              to: coreDocRoutes.building,
             },
           ],
         },
@@ -203,11 +237,11 @@ const config: Config = {
           items: [
             {
               label: 'OPENAPI',
-              to: '/docs/product-guides/qing-code/openapi',
+              to: coreDocRoutes.openapi,
             },
             {
               label: '解决方案',
-              to: '/docs/solutions/inventory-management',
+              to: coreDocRoutes.solutions,
             },
           ],
         },
@@ -221,6 +255,7 @@ const config: Config = {
     },
   } satisfies Preset.ThemeConfig,
   customFields: {
+    coreDocRoutes,
     repoUrl:
       process.env.GITHUB_EDIT_URL ??
       'https://github.com/nonepointer666/qingflow-help-center/tree/main/',

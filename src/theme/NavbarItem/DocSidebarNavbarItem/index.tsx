@@ -3,26 +3,27 @@ import {
   useActiveDocContext,
   useLayoutDocsSidebar,
 } from '@docusaurus/plugin-content-docs/client';
+import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import DefaultNavbarItem from '@theme/NavbarItem/DefaultNavbarItem';
 import DropdownNavbarItem from '@theme/NavbarItem/DropdownNavbarItem';
 import type {Props} from '@theme/NavbarItem/DocSidebarNavbarItem';
 
 const mobileProductSections = [
-  {label: '新手指南', to: '/docs/getting-started'},
-  {label: '更新动态', to: '/docs/release-notes'},
-  {label: '帮助文档', to: '/docs/product-guides/qingflow-introduction'},
+  {label: '新手指南', route: 'gettingStarted'},
+  {label: '更新动态', route: 'releaseNotes'},
+  {label: '帮助文档', route: 'introduction'},
   {
     label: '解决方案',
-    to: '/docs/solutions/inventory-management',
+    route: 'solutions',
   },
   {
     label: '搭建技巧',
-    to: '/docs/building-guides/inventory-outbound-validation',
+    route: 'building',
   },
-  {label: '常见问题（FAQ）', to: '/docs/faq'},
-  {label: '视频中心', to: '/docs/video-guides'},
-  {label: '联系我们', to: '/docs/contact'},
-];
+  {label: '常见问题（FAQ）', route: 'faq'},
+  {label: '视频中心', route: 'videos'},
+  {label: '联系我们', route: 'contact'},
+] as const;
 
 export default function DocSidebarNavbarItem({
   sidebarId,
@@ -32,7 +33,12 @@ export default function DocSidebarNavbarItem({
   ...props
 }: Props): ReactNode {
   const {activeDoc} = useActiveDocContext(docsPluginId);
+  const {siteConfig} = useDocusaurusContext();
   const sidebarLink = useLayoutDocsSidebar(sidebarId, docsPluginId).link;
+  const coreDocRoutes = siteConfig.customFields?.coreDocRoutes as Record<
+    (typeof mobileProductSections)[number]['route'],
+    string
+  >;
 
   if (!sidebarLink) {
     throw new Error(
@@ -46,7 +52,10 @@ export default function DocSidebarNavbarItem({
         {...props}
         mobile
         label={label ?? sidebarLink.label}
-        items={mobileProductSections}
+        items={mobileProductSections.map(({label: itemLabel, route}) => ({
+          label: itemLabel,
+          to: coreDocRoutes[route],
+        }))}
       />
     );
   }

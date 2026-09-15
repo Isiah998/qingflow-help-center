@@ -74,6 +74,16 @@ type SearchState = 'idle' | 'loading' | 'ready' | 'error';
 type SynonymGroup = {terms: string[]};
 type LocalSearchData = {documents: SearchDocument[]; synonymGroups: SynonymGroup[]};
 type SearchPageResult = {hits: SearchHit[]; found: number; page: number; perPage: number};
+type CoreDocRoutes = {
+  gettingStarted: string;
+  releaseNotes: string;
+  introduction: string;
+  collectData: string;
+  workflow: string;
+  permissions: string;
+  openapi: string;
+  faq: string;
+};
 
 const PAGE_SIZE = 8;
 const GROUP_HIT_LIMIT = 5;
@@ -81,64 +91,66 @@ const RELAXED_CANDIDATE_LIMIT = 40;
 const RELAXED_RESULT_LIMIT = 2;
 const SEARCH_LOADING_DELAY_MS = 200;
 
-const localDocuments: SearchDocument[] = [
-  {
-    title: '新手指南',
-    section: '快速开始',
-    content: '认识轻流，了解核心概念并开始使用产品。',
-    url: '/docs/getting-started',
-    tags: ['入门', '帮助中心'],
-  },
-  {
-    title: '如何收集和流转数据',
-    section: '快速开始',
-    content: '使用表单和流程收集、处理并流转业务数据。',
-    url: '/docs/product-guides/qingflow-introduction/collect-and-route-data',
-    tags: ['表单', '流程', '数据'],
-  },
-  {
-    title: '轻流简介',
-    section: '快速开始',
-    content: '了解轻流的核心功能、应用场景和账号模式。',
-    url: '/docs/product-guides/qingflow-introduction',
-    tags: ['轻流', '入门'],
-  },
-  {
-    title: '流程引擎',
-    section: '流程与审批',
-    content: '配置申请、审批、填写和抄送节点，管理业务流程。',
-    url: '/docs/product-guides/workflow-engine',
-    tags: ['审批', '流程', '待办'],
-  },
-  {
-    title: '权限管理',
-    section: '管理后台',
-    content: '配置工作区权限、高级权限和管理员角色。',
-    url: '/docs/product-guides/admin-console/permissions',
-    tags: ['权限', '管理员'],
-  },
-  {
-    title: '更新日志',
-    section: '更新动态',
-    content: '查看轻流各版本的产品功能更新记录。',
-    url: '/docs/release-notes',
-    tags: ['更新', '版本'],
-  },
-  {
-    title: 'OPENAPI',
-    section: '开放平台',
-    content: '了解轻流开放接口、鉴权方式和系统集成能力。',
-    url: '/docs/product-guides/qing-code/openapi',
-    tags: ['API', '开发'],
-  },
-  {
-    title: '常见问题',
-    section: 'FAQ',
-    content: '查找轻流产品使用过程中常见问题的处理方法。',
-    url: '/docs/faq',
-    tags: ['问题', 'FAQ'],
-  },
-];
+function createLocalDocuments(routes: CoreDocRoutes): SearchDocument[] {
+  return [
+    {
+      title: '新手指南',
+      section: '快速开始',
+      content: '认识轻流，了解核心概念并开始使用产品。',
+      url: routes.gettingStarted,
+      tags: ['入门', '帮助中心'],
+    },
+    {
+      title: '如何收集和流转数据',
+      section: '快速开始',
+      content: '使用表单和流程收集、处理并流转业务数据。',
+      url: routes.collectData,
+      tags: ['表单', '流程', '数据'],
+    },
+    {
+      title: '轻流简介',
+      section: '快速开始',
+      content: '了解轻流的核心功能、应用场景和账号模式。',
+      url: routes.introduction,
+      tags: ['轻流', '入门'],
+    },
+    {
+      title: '流程引擎',
+      section: '流程与审批',
+      content: '配置申请、审批、填写和抄送节点，管理业务流程。',
+      url: routes.workflow,
+      tags: ['审批', '流程', '待办'],
+    },
+    {
+      title: '权限管理',
+      section: '管理后台',
+      content: '配置工作区权限、高级权限和管理员角色。',
+      url: routes.permissions,
+      tags: ['权限', '管理员'],
+    },
+    {
+      title: '更新日志',
+      section: '更新动态',
+      content: '查看轻流各版本的产品功能更新记录。',
+      url: routes.releaseNotes,
+      tags: ['更新', '版本'],
+    },
+    {
+      title: 'OPENAPI',
+      section: '开放平台',
+      content: '了解轻流开放接口、鉴权方式和系统集成能力。',
+      url: routes.openapi,
+      tags: ['API', '开发'],
+    },
+    {
+      title: '常见问题',
+      section: 'FAQ',
+      content: '查找轻流产品使用过程中常见问题的处理方法。',
+      url: routes.faq,
+      tags: ['问题', 'FAQ'],
+    },
+  ];
+}
 
 function shouldRequestRelaxedCandidates(query: string): boolean {
   const terms = query.toLowerCase().match(/[\p{Script=Han}]+|[a-z0-9]+/giu) ?? [];
@@ -385,12 +397,15 @@ export default function SearchPage(): ReactNode {
   const localIndexPromise = useRef<Promise<LocalSearchData> | null>(null);
   const synonymGroupsPromise = useRef<Promise<SynonymGroup[]> | null>(null);
   const customFields = (siteConfig.customFields ?? {}) as {
+    coreDocRoutes: CoreDocRoutes;
     typesense?: {
       host?: string;
       searchApiKey?: string;
       collection?: string;
     };
   };
+  const coreDocRoutes = customFields.coreDocRoutes;
+  const localDocuments = createLocalDocuments(coreDocRoutes);
   const [query, setQuery] = useState('');
   const [state, setState] = useState<SearchState>('idle');
   const [showLoading, setShowLoading] = useState(false);
@@ -745,7 +760,7 @@ export default function SearchPage(): ReactNode {
                   <FileSearch aria-hidden="true" size={30} />
                   <Heading as="h2">没有找到相关内容</Heading>
                   <p>试试缩短问题，或者使用功能名称重新搜索。</p>
-                  <Link to="/docs/getting-started">浏览完整文档目录</Link>
+                  <Link to={coreDocRoutes.gettingStarted}>浏览完整文档目录</Link>
                 </div>
               ) : null}
 
@@ -773,7 +788,7 @@ export default function SearchPage(): ReactNode {
                     .map((item) => item.trim())
                     .filter(Boolean);
                   const destination = addSearchHighlightToUrl(
-                    document.url ?? '/docs/getting-started',
+                    document.url ?? coreDocRoutes.gettingStarted,
                     query,
                   );
 
