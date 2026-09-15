@@ -1,6 +1,7 @@
 import {createHash} from 'node:crypto';
 
 const safeDocumentIdPattern = /^[A-Za-z0-9_-]+$/;
+const safeCollectionNamePattern = /^[A-Za-z0-9_-]+$/;
 const deleteBatchSize = 100;
 
 export function getTypesenseSynonymSetName(collection) {
@@ -52,6 +53,15 @@ function normalizeHost(host) {
   return normalized;
 }
 
+function normalizeCollectionName(value, label = 'Typesense collection') {
+  const normalized = String(value ?? '').trim();
+  if (!normalized) throw new Error(`${label} must not be empty.`);
+  if (!safeCollectionNamePattern.test(normalized)) {
+    throw new Error(`${label} contains unsupported characters.`);
+  }
+  return normalized;
+}
+
 function collectionUrl(host, collection, suffix = '') {
   return `${host}/collections/${encodeURIComponent(collection)}${suffix}`;
 }
@@ -65,6 +75,10 @@ function requestHeaders(apiKey, contentType) {
 
 function synonymSetUrl(host, name) {
   return `${host}/synonym_sets/${encodeURIComponent(name)}`;
+}
+
+function aliasUrl(host, alias) {
+  return `${host}/aliases/${encodeURIComponent(alias)}`;
 }
 
 function normalizeSynonymTerms(value) {
@@ -344,6 +358,188 @@ export async function deleteTypesenseDocuments({
   if (ids.length > 0) logger.log(`Deleted ${ids.length} stale records from ${collection}`);
 }
 
+export async function getTypesenseAlias({
+  host,
+  apiKey,
+  alias,
+  fetchImpl = fetch,
+}) {
+  const normalizedHost = normalizeHost(host);
+  const normalizedAlias = normalizeCollectionName(alias, 'Typesense alias');
+  if (!String(apiKey ?? '').trim()) {
+    throw new Error('TYPESENSE_ADMIN_API_KEY is required.');
+  }
+
+  const response = await fetchImpl(aliasUrl(normalizedHost, normalizedAlias), {
+    headers: requestHeaders(apiKey),
+  });
+  if (response.status === 404) return undefined;
+  if (!response.ok) {
+    throw new Error(
+      `Failed to retrieve Typesense alias: ${response.status}${await responseDetails(response)}`,
+    );
+  }
+
+  const result = await response.json();
+  return normalizeCollectionName(result?.collection_name, 'Typesense alias target');
+}
+
+export async function setTypesenseAlias({
+  host,
+  apiKey,
+  alias,
+  collection,
+  fetchImpl = fetch,
+}) {
+  const normalizedHost = normalizeHost(host);
+  const normalizedAlias = normalizeCollectionName(alias, 'Typesense alias');
+  const normalizedCollection = normalizeCollectionName(collection);
+  if (!String(apiKey ?? '').trim()) {
+    throw new Error('TYPESENSE_ADMIN_API_KEY is required.');
+  }
+
+  const response = await fetchImpl(aliasUrl(normalizedHost, normalizedAlias), {
+    method: 'PUT',
+    headers: requestHeaders(apiKey, 'application/json'),
+    body: JSON.stringify({collection_name: normalizedCollection}),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `Failed to update Typesense alias: ${response.status}${await responseDetails(response)}`,
+    );
+  }
+}
+
+export async function deleteTypesenseAlias({
+  host,
+  apiKey,
+  alias,
+  fetchImpl = fetch,
+}) {
+  const normalizedHost = normalizeHost(host);
+  const normalizedAlias = normalizeCollectionName(alias, 'Typesense alias');
+  if (!String(apiKey ?? '').trim()) {
+    throw new Error('TYPESENSE_ADMIN_API_KEY is required.');
+  }
+
+  const response = await fetchImpl(aliasUrl(normalizedHost, normalizedAlias), {
+    method: 'DELETE',
+    headers: requestHeaders(apiKey),
+  });
+  if (!response.ok && response.status !== 404) {
+    throw new Error(
+      `Failed to delete Typesense alias: ${response.status}${await responseDetails(response)}`,
+    );
+  }
+}
+
+export async function validateTypesenseCollection({
+  host,
+  apiKey,
+  collection,
+  expectedRecords,
+  fetchImpl = fetch,
+}) {
+  const normalizedHost = normalizeHost(host);
+  const normalizedCollection = normalizeCollectionName(collection);
+  if (!String(apiKey ?? '').trim()) throw new Error('Typesense API key is required.');
+  if (!Number.isSafeInteger(expectedRecords) || expectedRecords < 1) {
+    throw new Error('Expected Typesense record count must be a positive integer.');
+  }
+
+  const response = await fetchImpl(`${normalizedHost}/multi_search`, {
+    method: 'POST',
+    headers: requestHeaders(apiKey, 'application/json'),
+    body: JSON.stringify({
+      searches: [{
+        collection: normalizedCollection,
+        q: '*',
+        query_by: 'title',
+        per_page: 1,
+      }],
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `Failed to validate Typesense collection: ${response.status}${await responseDetails(response)}`,
+    );
+  }
+
+  const result = (await response.json())?.results?.[0];
+  if (result?.error) {
+    throw new Error(`Typesense validation query failed: ${String(result.error).slice(0, 300)}`);
+  }
+  if (result?.found !== expectedRecords) {
+    throw new Error(
+      `Typesense validation found ${result?.found ?? 0} of ${expectedRecords} expected records.`,
+    );
+  }
+}
+
+export async function restoreTypesenseAlias({
+  host,
+  apiKey,
+  alias,
+  previousCollection,
+  fetchImpl = fetch,
+}) {
+  if (previousCollection) {
+    await setTypesenseAlias({
+      host,
+      apiKey,
+      alias,
+      collection: previousCollection,
+      fetchImpl,
+    });
+    return;
+  }
+  await deleteTypesenseAlias({host, apiKey, alias, fetchImpl});
+}
+
+export async function activateTypesenseAlias({
+  host,
+  adminApiKey,
+  searchApiKey,
+  alias,
+  collection,
+  previousCollection,
+  expectedRecords,
+  fetchImpl = fetch,
+}) {
+  await setTypesenseAlias({
+    host,
+    apiKey: adminApiKey,
+    alias,
+    collection,
+    fetchImpl,
+  });
+  try {
+    await validateTypesenseCollection({
+      host,
+      apiKey: searchApiKey,
+      collection: alias,
+      expectedRecords,
+      fetchImpl,
+    });
+  } catch (error) {
+    try {
+      await restoreTypesenseAlias({
+        host,
+        apiKey: adminApiKey,
+        alias,
+        previousCollection,
+        fetchImpl,
+      });
+    } catch (rollbackError) {
+      throw new AggregateError(
+        [error, rollbackError],
+        'Typesense alias activation and rollback both failed.',
+      );
+    }
+    throw error;
+  }
+}
+
 export async function syncTypesense({
   host,
   apiKey,
@@ -357,7 +553,7 @@ export async function syncTypesense({
   if (!String(apiKey ?? '').trim()) {
     throw new Error('TYPESENSE_ADMIN_API_KEY is required.');
   }
-  if (!String(collection).trim()) throw new Error('TYPESENSE_COLLECTION must not be empty.');
+  collection = normalizeCollectionName(collection, 'TYPESENSE_COLLECTION');
 
   const currentIds = validateSearchRecords(records);
   const options = {

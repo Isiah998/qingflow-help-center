@@ -55,10 +55,15 @@ git_revision="${GIT_COMMIT:-$(git rev-parse HEAD)}"
 export BUILD_COMMIT="${git_revision}"
 export DOCS_URL="${DOCS_URL:-https://help-center.qingflow.com}"
 export DOCS_BASE_URL="${DOCS_BASE_URL:-/}"
-export OUTLINE_URL="${OUTLINE_URL:-https://outline.dev.oalite.com}"
-export OUTLINE_COLLECTION="${OUTLINE_COLLECTION:-售后知识库}"
+export OUTLINE_URL="${OUTLINE_URL:-https://outline.qingflow.com}"
+export OUTLINE_COLLECTION="${OUTLINE_COLLECTION:-售后知识库(公开)}"
 export TYPESENSE_SEARCH_HOST="${TYPESENSE_SEARCH_HOST:-/typesense}"
-export TYPESENSE_COLLECTION="${TYPESENSE_COLLECTION:-qingflow_help_docs}"
+typesense_base_collection="${TYPESENSE_BASE_COLLECTION:-${TYPESENSE_COLLECTION:-qingflow_help_docs}}"
+export TYPESENSE_COLLECTION="${TYPESENSE_ALIAS:-${typesense_base_collection}_current}"
+[[ "${typesense_base_collection}" =~ ^[A-Za-z0-9_-]+$ ]] \
+  || fail "TYPESENSE_BASE_COLLECTION contains unsupported characters"
+[[ "${TYPESENSE_COLLECTION}" =~ ^[A-Za-z0-9_-]+$ ]] \
+  || fail "TYPESENSE_ALIAS contains unsupported characters"
 if [[ -z "${NODE_OPTIONS:-}" ]]; then
   export NODE_OPTIONS="--max-old-space-size=4096"
 fi
@@ -77,6 +82,7 @@ search_record_count="$(node -e 'const fs=require("node:fs"); const records=JSON.
 printf 'Validated %s search records.\n' "${search_record_count}"
 
 content_revision="$(sha256sum .tmp/search-records.json | awk '{print substr($1, 1, 12)}')"
+export TYPESENSE_TARGET_COLLECTION="${typesense_base_collection}_v_${content_revision}"
 short_revision="${git_revision:0:12}"
 if [[ -z "${IMAGE_TAG:-}" ]]; then
   require_environment BUILD_NUMBER
@@ -96,10 +102,12 @@ docker build --pull \
   --tag "${image_ref}" \
   .
 
+docker run --rm "${image_ref}" nginx -t
+
 docker push "${image_ref}"
 
-printf 'Publishing the search index from the same content snapshot...\n'
-npm run search:push
+printf 'Staging and validating the versioned search index from the same content snapshot...\n'
+npm run search:push -- stage
 
 if [[ "${DEPLOY_TO_K8S}" == "true" ]]; then
   require_command kubectl
@@ -109,14 +117,44 @@ if [[ "${DEPLOY_TO_K8S}" == "true" ]]; then
   kube_container="${KUBE_CONTAINER:-help-center}"
   rollout_timeout="${KUBE_ROLLOUT_TIMEOUT:-5m}"
   smoke_test_url="${SMOKE_TEST_URL:-http://qingflow-help-center.${kube_namespace}.svc.cluster.local}"
+  typesense_alias_activated=false
+  kube_rollout_started=false
+
+  rollback_release() {
+    local exit_code="$?"
+    trap - EXIT
+    if [[ "${exit_code}" -eq 0 ]]; then
+      return
+    fi
+    set +e
+    if [[ "${typesense_alias_activated}" == "true" ]]; then
+      printf 'Restoring the previous Typesense alias target...\n' >&2
+      npm run search:push -- restore >&2
+    fi
+    if [[ "${kube_rollout_started}" == "true" ]]; then
+      printf 'Rolling Kubernetes back to the previous revision...\n' >&2
+      kubectl --namespace "${kube_namespace}" rollout undo \
+        "deployment/${kube_deployment}" >&2
+      kubectl --namespace "${kube_namespace}" rollout status \
+        "deployment/${kube_deployment}" \
+        --timeout "${rollout_timeout}" >&2
+    fi
+    exit "${exit_code}"
+  }
+  trap rollback_release EXIT
 
   printf 'Deploying %s to %s/%s...\n' "${image_ref}" "${kube_namespace}" "${kube_deployment}"
   kubectl --namespace "${kube_namespace}" set image \
     "deployment/${kube_deployment}" \
     "${kube_container}=${image_ref}"
+  kube_rollout_started=true
   kubectl --namespace "${kube_namespace}" rollout status \
     "deployment/${kube_deployment}" \
     --timeout "${rollout_timeout}"
+
+  printf 'Activating the validated Typesense collection through %s...\n' "${TYPESENSE_COLLECTION}"
+  npm run search:push -- activate
+  typesense_alias_activated=true
 
   printf 'Checking the deployed site and Typesense proxy through %s...\n' "${smoke_test_url}"
   retry_curl --fail --silent --show-error --output /dev/null \
@@ -133,6 +171,10 @@ if [[ "${DEPLOY_TO_K8S}" == "true" ]]; then
   node -e 'const fs=require("node:fs"); const payload=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); const result=payload.results?.[0]; if (!result || result.error || !Number.isFinite(result.found) || result.found < 1) process.exit(1);' \
     "${search_smoke_response}" || fail "Typesense proxy returned an invalid response"
   rm -f "${search_smoke_response}"
+  trap - EXIT
+else
+  printf 'Prepared %s without changing the live Typesense alias; the deployment owner must activate it during rollout.\n' \
+    "${TYPESENSE_TARGET_COLLECTION}"
 fi
 
 printf 'Jenkins release completed. IMAGE_REF=%s CONTENT_REVISION=%s\n' \

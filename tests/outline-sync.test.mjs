@@ -23,12 +23,12 @@ import {
   fetchOutlineSnapshot,
   findRelativeMediaReferences,
   generateOutlineOutput,
-  readLegacyRoutes,
   replaceGeneratedOutput,
   rewriteMarkdownUrls,
   serializeGeneratedDocument,
   serializeGeneratedSidebar,
   validateOutlineMarkdown,
+  validateRouteMap,
 } from '../scripts/lib/outline-sync.mjs';
 
 const baseUrl = 'https://outline.dev.oalite.com';
@@ -413,6 +413,10 @@ test('generated descriptions preserve Unicode and do not end in a Markdown escap
   assert.match(trailingEscape, /description: "a{179}"/);
 });
 
+test('Outline conversion removes control characters that break HTML minification', () => {
+  assert.equal(rewriteMarkdownUrls('before\u0008after', [], baseUrl), 'beforeafter');
+});
+
 test('generated documents keep navigation paths separate from search keywords', () => {
   const generated = serializeGeneratedDocument(
     {
@@ -447,50 +451,59 @@ test('Outline Markdown rejects executable MDX and unsafe JSX', async () => {
   await assert.rejects(validateOutlineMarkdown('[unsafe](javascript:alert(1))'));
 });
 
-test('legacy routes match by full breadcrumb and ambiguous matches fail closed', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'outline-routes-'));
-  t.after(() => rm(root, {recursive: true, force: true}));
-  const docsRoot = path.join(root, 'docs', 'migrated');
-  await mkdir(docsRoot, {recursive: true});
-  const document = (slug, body) => [
-    '---',
-    'title: "成员"',
-    `slug: "${slug}"`,
-    '---',
-    body,
-    '',
-  ].join('\n');
-  await writeFile(path.join(docsRoot, 'one.mdx'), document('/product-guides/form/member', 'One'));
-  await writeFile(path.join(docsRoot, 'two.mdx'), document('/product-guides/form/member-2', 'Two'));
-  const sidebarFile = path.join(root, 'sidebars.ts');
-  await writeFile(
-    sidebarFile,
-    [
-      "import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';",
-      'const sidebars: SidebarsConfig = {"helpCenterSidebar":[{"type":"category","label":"产品指南","items":[{"type":"category","label":"表单","items":["migrated/one","migrated/two"]}]}]};',
-      'export default sidebars;',
-    ].join('\n'),
-  );
-  const legacyRoutes = await readLegacyRoutes({docsRoot, sidebarFile});
-  const outlineDocument = {
-    id: 'outline-1',
+test('canonical routes always use urlId while the route map only preserves old URLs', () => {
+  const routeMap = validateRouteMap({
+    version: 2,
+    legacyRoutes: [{
+      from: '/product-guides/form/member',
+      status: 'active',
+      outlineUrlId: 'MemberOne',
+    }],
+  });
+  const first = assignDocumentRoutes([{
+    id: docIdOne,
     urlId: 'MemberOne',
     title: '成员',
     parents: ['产品指南', '表单'],
-  };
-  const assignment = assignDocumentRoutes([outlineDocument], legacyRoutes, {
-    version: 1,
-    documents: {},
-  });
-  assert.equal(assignment.conflicts.length, 1);
-  assert.equal(assignment.documents[0].slug, undefined);
+  }], [], routeMap);
+  const moved = assignDocumentRoutes([{
+    id: docIdOne,
+    urlId: 'MemberOne',
+    title: '成员管理',
+    parents: ['帮助文档', '组织架构'],
+  }], [], routeMap);
 
-  const mapped = assignDocumentRoutes([outlineDocument], legacyRoutes, {
-    version: 1,
-    documents: {'outline-1': {slug: '/product-guides/form/member'}},
+  assert.equal(first.conflicts.length, 0);
+  assert.equal(first.documents[0].slug, '/outline/memberone');
+  assert.equal(first.documents[0].routeSource, 'outline-url-id');
+  assert.equal(moved.documents[0].slug, first.documents[0].slug);
+});
+
+test('route validation fails closed for missing targets, duplicate urlIds, and redirect cycles', () => {
+  const missing = assignDocumentRoutes([{
+    id: docIdOne,
+    urlId: 'current',
+    title: 'Current',
+    parents: [],
+  }], [], {
+    version: 2,
+    legacyRoutes: [{from: '/old', status: 'active', outlineUrlId: 'deleted'}],
   });
-  assert.equal(mapped.conflicts.length, 0);
-  assert.equal(mapped.documents[0].routeSource, 'route-map');
+  assert.equal(missing.conflicts[0].type, 'missing-active-legacy-target');
+
+  const duplicate = assignDocumentRoutes([
+    {id: docIdOne, urlId: 'Same_ID', title: 'One', parents: []},
+    {id: docIdTwo, urlId: 'same-id', title: 'Two', parents: []},
+  ], [], {version: 2, legacyRoutes: []});
+  assert.equal(duplicate.conflicts[0].type, 'duplicate-url-id');
+
+  assert.throws(() => validateRouteMap({
+    version: 2,
+    legacyRoutes: [
+      {from: '/one', status: 'redirect', to: '/two'},
+      {from: '/two', status: 'redirect', to: '/one'},
+    ],
+  }), /cycle/i);
 });
 
 test('new documents receive a stable urlId route and parent documents link from the sidebar', () => {
@@ -500,7 +513,7 @@ test('new documents receive a stable urlId route and parent documents link from 
     title: 'New page',
     parents: [],
   };
-  const assignment = assignDocumentRoutes([document], [], {version: 1, documents: {}});
+  const assignment = assignDocumentRoutes([document], [], {version: 2, legacyRoutes: []});
   assert.equal(assignment.documents[0].slug, '/outline/abc123');
   const sidebar = serializeGeneratedSidebar([
     {...document, children: [{...document, id: 'child-id', title: 'Child', children: []}]},

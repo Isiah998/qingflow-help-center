@@ -16,7 +16,6 @@
     "build:site": "docusaurus build",
     "build:index": "node ./scripts/generate-search-records.mjs",
     "content:sync": "cross-env NODE_USE_ENV_PROXY=0 NO_PROXY=* no_proxy=* HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= http_proxy= https_proxy= all_proxy= node ./scripts/sync-outline.mjs sync",
-    "content:routes:bootstrap": "cross-env NODE_USE_ENV_PROXY=0 NO_PROXY=* no_proxy=* HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= http_proxy= https_proxy= all_proxy= node ./scripts/sync-outline.mjs bootstrap-routes",
     "assets:check": "node ./scripts/localize-doc-assets.mjs check",
     "assets:migrate": "node ./scripts/localize-doc-assets.mjs migrate",
     "assets:probe": "node ./scripts/localize-doc-assets.mjs probe",

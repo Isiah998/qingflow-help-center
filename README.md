@@ -41,7 +41,7 @@ npm run build
 
 This will:
 
-- synchronize the `售后知识库` collection from Outline
+- synchronize the `售后知识库(公开)` collection from Outline
 - build the Docusaurus site into `build/`
 - generate `.tmp/search-records.json` for Typesense indexing
 
@@ -49,7 +49,7 @@ Use `npm run build:legacy` for an offline build from `docs/migrated`.
 
 ## Outline content sync
 
-The production source URL is `https://outline.dev.oalite.com`. Configure a
+The production source URL is `https://outline.qingflow.com`. Configure a
 read-only `OUTLINE_API_TOKEN` in the environment and run:
 
 ```bash
@@ -64,19 +64,21 @@ kept as absolute Outline URLs. The sync process explicitly disables inherited
 HTTP, HTTPS, and SOCKS proxy environment settings and connects to Outline
 directly.
 
-Existing public routes are bound to Outline document IDs in
-`data/outline-route-map.json`. From an environment that can access Outline, run
-the following once and commit the resulting route map:
+Every current document uses the normalized Outline `urlId` as its canonical
+route (`/docs/outline/<urlId>`). Titles and directory moves therefore update the
+generated sidebar and breadcrumbs without changing the document URL. The
+versioned `data/outline-route-map.json` contains only compatibility records for
+URLs that were already published before this routing model; new Outline
+documents are never added to it. Active records redirect directly to a current
+`urlId`, explicit redirects point to a replacement, and deleted records retain
+a permanent `noindex` retirement page. If an active compatibility target
+disappears, synchronization fails before replacing the previous generated
+snapshot so the record must be explicitly changed to `redirect` or `deleted`.
 
-```bash
-npm run content:routes:bootstrap
-```
-
-Normal Outline syncs fail closed until this initial route map has been committed.
-Ambiguous legacy matches fail and are reported in
-`.tmp/outline-route-conflicts.json`. Resolve those entries explicitly in the
-route map before publishing. Never put an API token in this repository or in a
-command committed to shell history.
+Normal synchronization does not read `docs/migrated/` or `sidebars.ts`.
+`sidebars.generated.ts`, document navigation paths, and search breadcrumbs are
+always derived from the current Outline tree. Never put an API token in this
+repository or in a command committed to shell history.
 
 Container builds also require the token as a BuildKit secret so that it is not
 stored in an image layer:
@@ -160,11 +162,12 @@ Configure these secret-text credentials as masked environment variables:
 Configure these non-secret environment variables:
 
 ```text
-OUTLINE_URL=https://outline.dev.oalite.com
-OUTLINE_COLLECTION=售后知识库
+OUTLINE_URL=https://outline.qingflow.com
+OUTLINE_COLLECTION=售后知识库(公开)
 TYPESENSE_HOST=http://typesense-0.typesense-headless.outline.svc.cluster.local:8108
 TYPESENSE_SEARCH_HOST=/typesense
-TYPESENSE_COLLECTION=qingflow_help_docs
+TYPESENSE_BASE_COLLECTION=qingflow_help_docs
+TYPESENSE_ALIAS=qingflow_help_docs_current
 IMAGE_REPOSITORY=harbor.oalite.com/<project>/qingflow-help-center
 DEPLOY_TO_K8S=true
 KUBE_NAMESPACE=default
@@ -183,25 +186,31 @@ bash scripts/jenkins-release.sh
 ```
 
 The script installs locked dependencies, validates the project, synchronizes
-Outline exactly once, builds the site and search records from that snapshot,
-packages `build/` with `Dockerfile.runtime`, pushes an immutable
-`<git-sha>-<jenkins-build-number>-<search-snapshot-hash>` image, updates
-Typesense, and optionally waits for the Kubernetes rollout. Jenkins supplies
-`BUILD_NUMBER` automatically; an explicit `IMAGE_TAG` overrides the generated
-tag. Set `DEPLOY_TO_K8S=false` when another Jenkins stage or GitOps controller
-owns deployment. After a direct rollout, the script verifies both `/healthz`
-and an actual query through `/typesense/multi_search`;
+Outline exactly once, and builds the site plus search records from that one
+snapshot. It creates and validates a versioned Typesense collection, packages
+`build/` with `Dockerfile.runtime`, verifies Nginx configuration, and pushes an
+immutable `<git-sha>-<jenkins-build-number>-<search-snapshot-hash>` image. After
+the Kubernetes rollout succeeds it atomically points the stable Typesense alias
+at the staged collection, then verifies both `/healthz` and an actual query
+through `/typesense/multi_search`. A failed rollout or smoke test restores the
+previous alias and executes `kubectl rollout undo`, so the previous site and
+search snapshot remain available. Jenkins supplies `BUILD_NUMBER`
+automatically; an explicit `IMAGE_TAG` overrides the generated tag. Set
+`DEPLOY_TO_K8S=false` when another Jenkins stage or GitOps controller owns
+deployment; this mode stages the versioned search collection without changing
+the live alias.
 `SMOKE_TEST_URL` may instead point to the public HTTPS site when the Jenkins
 agent cannot resolve Kubernetes service DNS.
 
-Run this release step only for the protected production branch, mask every
-credential in Jenkins, and disable concurrent builds for the job so two content
-snapshots cannot update Typesense and Kubernetes at the same time.
-
-Configure the Jenkins job to run for protected-branch pushes and for the
-approved Outline webhook relay (with a periodic reconciliation build as a
-fallback). Every invocation performs a fresh full Outline sync; generated
-documents remain build artifacts and are not committed to Git.
+The committed `Jenkinsfile` restricts releases to `main`, disables concurrent
+builds, applies a 60-minute timeout, and runs a full reconciliation every six
+hours. Configure the multibranch job to inject the masked credentials above and
+to build protected-branch pushes. For faster content publication, route Outline
+webhook events through an authenticated internal relay or Jenkins integration
+with event filtering and debounce; do not expose a Jenkins build token directly
+to Outline. Every invocation performs a fresh full Outline sync, and generated
+documents remain build artifacts rather than Git content. The search-only key
+must be scoped to the stable alias (by default `qingflow_help_docs_current`).
 
 ## Key directories
 
@@ -216,6 +225,6 @@ typesense/schema/      Collection schema reference
 ## Next suggested milestones
 
 1. Connect a real Typesense instance and search-only API key
-2. Add scheduled Outline synchronization and content freshness monitoring
+2. Add content freshness monitoring and stale versioned-index cleanup
 3. Add OpenAPI-driven API reference pages
 4. Add AI answer generation with source citations

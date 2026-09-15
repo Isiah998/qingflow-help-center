@@ -10,8 +10,8 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 
-export const DEFAULT_OUTLINE_URL = 'https://outline.dev.oalite.com';
-export const DEFAULT_OUTLINE_COLLECTION = '售后知识库';
+export const DEFAULT_OUTLINE_URL = 'https://outline.qingflow.com';
+export const DEFAULT_OUTLINE_COLLECTION = '售后知识库(公开)';
 
 const routePattern = /^\/[a-z0-9][a-z0-9/-]*$/;
 const outlineDocumentIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -478,99 +478,125 @@ export async function readLegacyRoutes({docsRoot, sidebarFile}) {
 export async function readRouteMap(filePath) {
   try {
     const parsed = JSON.parse(await readFile(filePath, 'utf8'));
-    if (parsed?.version !== 1 || !parsed.documents || typeof parsed.documents !== 'object') {
-      throw new Error('Outline route map must use version 1 and contain a documents object.');
-    }
-    return parsed;
+    return validateRouteMap(parsed);
   } catch (error) {
-    if (error.code === 'ENOENT') return {version: 1, documents: {}};
+    if (error.code === 'ENOENT') return {version: 2, legacyRoutes: []};
     throw error;
   }
 }
 
-function stableNewRoute(document, reservedSlugs) {
-  const routeId = String(document.urlId ?? document.id)
+function normalizeOutlineUrlId(value) {
+  const routeId = String(value ?? '')
     .toLowerCase()
     .replace(/[^a-z0-9-]+/g, '-')
     .replace(/^-+|-+$/g, '');
-  if (!routeId) throw new Error(`Outline document has no usable urlId: ${document.id}`);
-  const base = `/outline/${routeId}`;
-  if (!reservedSlugs.has(base)) return base;
-  return `${base}-${String(document.id).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8)}`;
+  return routeId;
 }
 
-export function assignDocumentRoutes(documents, legacyRoutes, routeMap) {
-  const legacyByKey = new Map();
-  for (const route of legacyRoutes) {
-    const candidates = legacyByKey.get(route.key) ?? [];
-    candidates.push(route);
-    legacyByKey.set(route.key, candidates);
+export function outlineCanonicalRoute(urlId) {
+  const routeId = normalizeOutlineUrlId(urlId);
+  if (!routeId) throw new Error('Outline document has no usable urlId.');
+  return `/outline/${routeId}`;
+}
+
+export function validateRouteMap(value) {
+  if (value?.version !== 2 || !Array.isArray(value.legacyRoutes)) {
+    throw new Error('Outline route map must use version 2 and contain a legacyRoutes array.');
   }
 
-  const reservedSlugs = new Map();
-  for (const [id, entry] of Object.entries(routeMap.documents ?? {})) {
-    const slug = String(entry?.slug ?? '');
-    if (!routePattern.test(slug)) throw new Error(`Invalid slug in route map for ${id}: ${slug}`);
-    const owner = reservedSlugs.get(slug);
-    if (owner && owner !== id) throw new Error(`Duplicate slug in route map: ${slug}`);
-    reservedSlugs.set(slug, id);
+  const sources = new Set();
+  const normalized = value.legacyRoutes.map((entry, index) => {
+    assertObject(entry, `Outline legacy route ${index + 1} is invalid.`);
+    const from = String(entry.from ?? '').trim();
+    const status = String(entry.status ?? '').trim();
+    if (!routePattern.test(from)) throw new Error(`Invalid legacy route source: ${from}`);
+    if (sources.has(from)) throw new Error(`Duplicate legacy route source: ${from}`);
+    sources.add(from);
+    if (!['active', 'redirect', 'deleted'].includes(status)) {
+      throw new Error(`Invalid legacy route status for ${from}: ${status}`);
+    }
+    if (status === 'active') {
+      const outlineUrlId = String(entry.outlineUrlId ?? '').trim();
+      if (!normalizeOutlineUrlId(outlineUrlId)) {
+        throw new Error(`Active legacy route has no usable outlineUrlId: ${from}`);
+      }
+      return {...entry, from, status, outlineUrlId};
+    }
+    if (status === 'redirect') {
+      const to = String(entry.to ?? '').trim();
+      if (!routePattern.test(to) || to === from) {
+        throw new Error(`Invalid legacy redirect target for ${from}: ${to}`);
+      }
+      return {...entry, from, status, to};
+    }
+    const removedAt = String(entry.removedAt ?? '').trim();
+    if (!removedAt || Number.isNaN(Date.parse(removedAt))) {
+      throw new Error(`Deleted legacy route has an invalid removedAt value: ${from}`);
+    }
+    return {...entry, from, status, removedAt};
+  });
+
+  const redirects = new Map(
+    normalized
+      .filter((entry) => entry.status === 'redirect')
+      .map((entry) => [entry.from, entry.to]),
+  );
+  for (const source of redirects.keys()) {
+    const visited = new Set([source]);
+    let target = redirects.get(source);
+    while (redirects.has(target)) {
+      if (visited.has(target)) throw new Error(`Legacy redirect cycle detected at ${target}`);
+      visited.add(target);
+      target = redirects.get(target);
+    }
   }
 
+  return {...value, legacyRoutes: normalized};
+}
+
+export function assignDocumentRoutes(documents, _legacyRoutes = [], routeMap = {version: 2, legacyRoutes: []}) {
+  const validatedRouteMap = validateRouteMap(routeMap);
   const conflicts = [];
   const assignedSlugs = new Map();
   const assigned = documents.map((document) => {
-    const mapped = routeMap.documents?.[document.id];
-    let slug = mapped?.slug;
-    let routeSource = 'route-map';
-    if (!slug) {
-      const key = routeKey([...document.parents, document.title]);
-      const candidates = legacyByKey.get(key) ?? [];
-      if (candidates.length > 1) {
-        conflicts.push({
-          outlineId: document.id,
-          title: document.title,
-          breadcrumb: [...document.parents, document.title],
-          candidates: candidates.map(({relative, slug: candidateSlug}) => ({
-            file: relative,
-            slug: candidateSlug,
-          })),
-        });
-      }
-      if (candidates.length === 1) {
-        slug = candidates[0].slug;
-        routeSource = 'legacy-match';
-      } else if (candidates.length === 0) {
-        slug = stableNewRoute(
-          document,
-          new Set([...reservedSlugs.keys(), ...assignedSlugs.keys()]),
-        );
-        routeSource = 'outline-id';
-      }
+    let slug;
+    try {
+      slug = outlineCanonicalRoute(document.urlId);
+    } catch {
+      conflicts.push({
+        type: 'invalid-url-id',
+        outlineId: document.id,
+        title: document.title,
+        urlId: document.urlId,
+      });
     }
-
     if (slug) {
-      const reservedOwner = reservedSlugs.get(slug);
-      if (reservedOwner && reservedOwner !== document.id) {
-        conflicts.push({
-          outlineId: document.id,
-          title: document.title,
-          breadcrumb: [...document.parents, document.title],
-          candidates: [{routeMapOwner: reservedOwner, slug}],
-        });
-      }
       const assignedOwner = assignedSlugs.get(slug);
       if (assignedOwner && assignedOwner !== document.id) {
         conflicts.push({
+          type: 'duplicate-url-id',
           outlineId: document.id,
           title: document.title,
-          breadcrumb: [...document.parents, document.title],
           candidates: [{outlineId: assignedOwner, slug}],
         });
       }
       assignedSlugs.set(slug, document.id);
     }
-    return {...document, slug, routeSource};
+    return {...document, slug, routeSource: 'outline-url-id'};
   });
+
+  const currentRoutes = new Set(assigned.map((document) => document.slug).filter(Boolean));
+  for (const entry of validatedRouteMap.legacyRoutes) {
+    if (entry.status !== 'active') continue;
+    const target = outlineCanonicalRoute(entry.outlineUrlId);
+    if (!currentRoutes.has(target)) {
+      conflicts.push({
+        type: 'missing-active-legacy-target',
+        from: entry.from,
+        outlineUrlId: entry.outlineUrlId,
+      });
+    }
+  }
 
   return {documents: assigned, conflicts};
 }
@@ -798,6 +824,7 @@ export function rewriteMarkdownUrls(markdown, documents, baseUrl, attachmentMeta
   let codeFence;
   const lines = String(markdown)
     .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
     .split('\n')
     .map((line) => {
       const unquotedLine = line.replace(/^(?: {0,3}> ?)+/, '');
@@ -1004,6 +1031,7 @@ export function serializeGeneratedDocument(document, markdown, baseUrl) {
     `source_url: ${JSON.stringify(sourceUrl)}`,
     `source_updated_at: ${JSON.stringify(document.updatedAt ?? '')}`,
     `outline_id: ${JSON.stringify(document.id)}`,
+    `outline_url_id: ${JSON.stringify(document.urlId)}`,
     ...(navigationPath.length > 0
       ? [
           'navigation_path:',
@@ -1186,7 +1214,7 @@ export async function generateOutlineOutput({
       collectionId: snapshot.collection.id,
       documents: assignedDocuments.length,
       routeSources: Object.fromEntries(
-        ['route-map', 'legacy-match', 'outline-id'].map((source) => [
+        ['outline-url-id'].map((source) => [
           source,
           assignedDocuments.filter((document) => document.routeSource === source).length,
         ]),
@@ -1206,25 +1234,6 @@ export async function generateOutlineOutput({
   } finally {
     await rm(stageRoot, {recursive: true, force: true});
   }
-}
-
-export function createBootstrappedRouteMap(snapshot, assignment, existingRouteMap) {
-  const documents = {...existingRouteMap.documents};
-  for (const document of assignment.documents) {
-    if (!document.slug) continue;
-    documents[document.id] = {
-      slug: document.slug,
-      title: document.title,
-      breadcrumb: [...document.parents, document.title],
-    };
-  }
-  return {
-    version: 1,
-    collection: {id: snapshot.collection.id, name: snapshot.collection.name},
-    documents: Object.fromEntries(
-      Object.entries(documents).sort(([left], [right]) => left.localeCompare(right)),
-    ),
-  };
 }
 
 export async function writeJson(filePath, value) {

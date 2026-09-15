@@ -10,7 +10,7 @@ import {createSearchSuggestionRecords} from '../src/utils/search-suggestions.mjs
 loadLocalEnvironment();
 
 const cwd = process.cwd();
-const {docsBaseRoot, docsRoot} = getContentPaths(cwd);
+const {source: contentSource, docsBaseRoot, docsRoot} = getContentPaths(cwd);
 const outputDir = path.join(cwd, '.tmp');
 const outputFile = path.join(outputDir, 'search-records.json');
 const publicOutputFile = path.join(cwd, 'static', 'search-records.json');
@@ -32,53 +32,71 @@ const sectionByRoute = new Map([
   ['contact', '联系我们'],
 ]);
 
+const sectionByLabel = new Map([
+  ['新手指南', '新手指南'],
+  ['更新动态', '更新动态'],
+  ['帮助文档', '帮助文档'],
+  ['解决方案', '解决方案'],
+  ['搭建技巧', '搭建技巧'],
+  ['常见问题（FAQ）', '常见问题-faq'],
+  ['常见问题(faq)', '常见问题-faq'],
+  ['视频中心', '视频中心'],
+  ['联系我们', '联系我们'],
+]);
+
 const llmsSections = [
   {
     section: '新手指南',
     title: '新手指南',
-    path: '/docs/getting-started/',
+    path: contentSource === 'outline' ? '/docs/outline/o8kebzouct/' : '/docs/getting-started/',
     description: '认识轻流核心概念并开始搭建第一个应用。',
   },
   {
     section: '帮助文档',
     title: '产品帮助文档',
-    path: '/docs/product-guides/qingflow-introduction/',
+    path: contentSource === 'outline'
+      ? '/docs/outline/d4flynedtc/'
+      : '/docs/product-guides/qingflow-introduction/',
     description: '查阅表单、流程、权限、数据和开放平台等产品能力。',
   },
   {
     section: '搭建技巧',
     title: '搭建技巧',
-    path: '/docs/building-guides/inventory-outbound-validation/',
+    path: contentSource === 'outline'
+      ? '/docs/outline/4kcf3aowp8/'
+      : '/docs/building-guides/inventory-outbound-validation/',
     description: '按功能和业务场景查找系统搭建方法。',
   },
   {
     section: '常见问题-faq',
     title: '常见问题',
-    path: '/docs/faq/',
+    path: contentSource === 'outline' ? '/docs/outline/4ohkf9hiol/' : '/docs/faq/',
     description: '快速定位产品使用中的高频问题。',
   },
   {
     section: '解决方案',
     title: '解决方案',
-    path: '/docs/solutions/inventory-management/',
+    path: contentSource === 'outline'
+      ? '/docs/outline/tye0qxvu6g/'
+      : '/docs/solutions/inventory-management/',
     description: '浏览按行业和场景整理的无代码解决方案。',
   },
   {
     section: '更新动态',
     title: '更新动态',
-    path: '/docs/release-notes/',
+    path: contentSource === 'outline' ? '/docs/outline/09v4h2x3bm/' : '/docs/release-notes/',
     description: '了解产品更新日志和重要公告。',
   },
   {
     section: '视频中心',
     title: '视频中心',
-    path: '/docs/video-guides/',
+    path: contentSource === 'outline' ? '/docs/outline/ldrdoionqu/' : '/docs/video-guides/',
     description: '通过视频教程学习轻流产品。',
   },
   {
     section: '联系我们',
     title: '联系我们',
-    path: '/docs/contact/',
+    path: contentSource === 'outline' ? '/docs/outline/vwdkk42e1f/' : '/docs/contact/',
     description: '获取轻流服务与支持联系方式。',
   },
 ];
@@ -166,7 +184,11 @@ function extractTitle(body, frontMatterTitle) {
   return firstHeading?.[1]?.trim() ?? 'Untitled';
 }
 
-function extractSection(relativePath, attributes) {
+function extractSection(relativePath, attributes, title) {
+  if (attributes.source === 'outline') {
+    const [root] = asStringArray(attributes.navigation_path);
+    return sectionByLabel.get(root ?? title) ?? root ?? title ?? '帮助文档';
+  }
   const slugSection = attributes.slug?.split('/').filter(Boolean)[0];
   if (slugSection) {
     return sectionByRoute.get(slugSection) ?? slugSection;
@@ -176,7 +198,13 @@ function extractSection(relativePath, attributes) {
   return parts.length > 1 ? parts[0] : 'general';
 }
 
-function inferBusinessPriority(relativePath, attributes) {
+function inferBusinessPriority(relativePath, attributes, category) {
+  if (attributes.source === 'outline') {
+    if (category === '帮助文档') return 30;
+    if (category === '常见问题-faq') return 20;
+    if (category === '更新动态') return 10;
+    return 0;
+  }
   const route = String(attributes.slug ?? '')
     .split('/')
     .filter(Boolean)[0]
@@ -216,6 +244,9 @@ function cleanMarkdown(body) {
 }
 
 function inferTags(relativePath, attributes, title) {
+  if (attributes.source === 'outline') {
+    return Array.from(new Set(asStringArray(attributes.navigation_path).slice(-4)));
+  }
   const slugTags = (attributes.slug ?? '')
     .split('/')
     .filter((part) => part && part !== title)
@@ -284,8 +315,8 @@ async function main() {
     const cleanBody = cleanMarkdown(body);
     const title = extractTitle(cleanBody, attributes.title);
     const content = normalizeContent(cleanBody);
-    const category = extractSection(relativePath, attributes);
-    const businessPriority = inferBusinessPriority(relativePath, attributes);
+    const category = extractSection(relativePath, attributes, title);
+    const businessPriority = inferBusinessPriority(relativePath, attributes, category);
     const tags = inferTags(relativePath, attributes, title);
     const legacyNavigationPath = asStringArray(attributes.keywords);
     const navigationPath = asStringArray(attributes.navigation_path);
