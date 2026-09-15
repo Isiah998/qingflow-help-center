@@ -225,7 +225,10 @@ const config: Config = {
       process.env.GITHUB_EDIT_URL ??
       'https://github.com/nonepointer666/qingflow-help-center/tree/main/',
     typesense: {
-      host: process.env.TYPESENSE_HOST ?? '',
+      host:
+        process.env.TYPESENSE_SEARCH_HOST?.trim() ||
+        process.env.TYPESENSE_HOST?.trim() ||
+        '',
       searchApiKey:
         process.env.TYPESENSE_SEARCH_API_KEY?.trim() ||
         '',
